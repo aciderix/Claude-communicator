@@ -3,14 +3,19 @@
  * claude-comm — serveur MCP de coordination entre sessions Claude Code.
  *
  * Chaque session Claude lance sa propre instance de ce serveur (stdio).
- * Les instances communiquent via un "hub" partagé sur disque
- * (par défaut ~/.claude-comm/<channel>), ce qui permet :
- *   - messagerie directe + broadcast entre sessions
- *   - état live de chaque session (statut, tâche en cours, progression)
- *   - demande de diff git du pair (lecture directe de son worktree)
- *   - tableau de tâches partagé avec claim atomique
- *   - verrous de fichiers pour éviter les collisions d'édition
- *   - attente bloquante d'événements (message, changement d'état...)
+ * Deux transports au choix :
+ *
+ *  - MODE FICHIER (défaut) : hub partagé sur disque (~/.claude-comm/<canal>)
+ *    pour des sessions sur la même machine (ou un montage partagé).
+ *
+ *  - MODE RELAIS (multi-machines) : CLAUDE_COMM_RELAY=<url> et
+ *    CLAUDE_COMM_TOKEN=<secret> pointent vers relay.js. Les requêtes de
+ *    service (diff, fichier) sont auto-répondues par l'instance du pair,
+ *    sans déranger son modèle.
+ *
+ * Capacités : messagerie directe/broadcast, état live, diff git du pair,
+ * lecture de fichier du pair, tableau de tâches partagé (claim atomique),
+ * verrous coopératifs, journal de décisions, attentes bloquantes.
  *
  * Zéro dépendance externe. Node >= 18.
  */
@@ -21,6 +26,10 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const {
+  sanitizeName, nowISO, newId, normalizePath, pathsOverlap,
+  emptyTasks, applyTaskAction, applyLockAction, applyNoteAction,
+} = require('./lib/shared');
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -31,13 +40,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
-      const key = a.slice(2);
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) { out[key] = next; i++; }
-      else out[key] = true;
-    } else {
-      out._.push(a);
-    }
+      if (next !== undefined && !next.startsWith('--')) { out[a.slice(2)] = next; i++; }
+      else out[a.slice(2)] = true;
+    } else out._.push(a);
   }
   return out;
 }
@@ -52,25 +58,27 @@ const NAME = sanitizeName(
   ARGS.name || process.env.CLAUDE_COMM_NAME || `claude-${crypto.randomBytes(2).toString('hex')}`
 );
 const ROLE = ARGS.role || process.env.CLAUDE_COMM_ROLE || '';
+const RELAY_URL = String(ARGS.relay || process.env.CLAUDE_COMM_RELAY || '').replace(/\/+$/, '');
+const TOKEN = ARGS.token || process.env.CLAUDE_COMM_TOKEN || '';
+const MODE = RELAY_URL ? 'relay' : 'file';
 const CWD = process.cwd();
+const HOSTNAME = os.hostname();
 
 const CHAN_DIR = path.join(HUB, CHANNEL);
 const SESSIONS_DIR = path.join(CHAN_DIR, 'sessions');
 const INBOX_DIR = path.join(CHAN_DIR, 'inbox');
-const LOCKS_DIR = path.join(CHAN_DIR, 'locks');
 const TASKS_FILE = path.join(CHAN_DIR, 'tasks.json');
-const TASKS_LOCK = path.join(CHAN_DIR, 'tasks.lock');
+const LOCKS_FILE = path.join(CHAN_DIR, 'locks.json');
+const NOTES_FILE = path.join(CHAN_DIR, 'notes.json');
+const STATE_LOCK = path.join(CHAN_DIR, 'state.lock');
 
-const OFFLINE_AFTER_MS = 15 * 60 * 1000; // sans heartbeat depuis 15 min => probablement parti
+const OFFLINE_AFTER_MS = 15 * 60 * 1000;
 const MAX_DIFF_CHARS = 30000;
+const MAX_FILE_BYTES = 100 * 1024;
 const MAX_WAIT_S = 300;
 
-function sanitizeName(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 40) || 'anon';
-}
-
 // ---------------------------------------------------------------------------
-// Utilitaires fichiers
+// Utilitaires
 // ---------------------------------------------------------------------------
 
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
@@ -92,26 +100,6 @@ function listDir(dir) {
 
 async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function withTasksLock(fn) {
-  for (let i = 0; i < 100; i++) {
-    try { fs.mkdirSync(TASKS_LOCK); break; }
-    catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      // verrou abandonné ? (> 30 s)
-      try {
-        const st = fs.statSync(TASKS_LOCK);
-        if (Date.now() - st.mtimeMs > 30000) { fs.rmdirSync(TASKS_LOCK); continue; }
-      } catch { /* disparu entre-temps */ }
-      if (i === 99) throw new Error('Impossible d\'obtenir le verrou du tableau de tâches.');
-      await sleep(25);
-    }
-  }
-  try { return await fn(); }
-  finally { try { fs.rmdirSync(TASKS_LOCK); } catch { /* ignore */ } }
-}
-
-function nowISO() { return new Date().toISOString(); }
-
 function ago(iso) {
   const ms = Date.now() - Date.parse(iso || 0);
   if (!isFinite(ms)) return '?';
@@ -126,201 +114,25 @@ function truncate(text, max = MAX_DIFF_CHARS) {
   return text.slice(0, max) + `\n... [tronqué : ${text.length - max} caractères omis]`;
 }
 
-// ---------------------------------------------------------------------------
-// Sessions (état live)
-// ---------------------------------------------------------------------------
-
-function sessionFile(name) { return path.join(SESSIONS_DIR, `${name}.json`); }
-
-function loadSession(name) { return readJSON(sessionFile(name), null); }
-
-function listSessions() {
-  return listDir(SESSIONS_DIR)
-    .filter((f) => f.endsWith('.json'))
-    .map((f) => readJSON(path.join(SESSIONS_DIR, f), null))
-    .filter(Boolean)
-    .sort((a, b) => (a.name < b.name ? -1 : 1));
-}
-
-function gitInfo(cwd) {
+let gitCache = { at: 0, info: { branch: null, head: null } };
+function gitInfo() {
+  if (Date.now() - gitCache.at < 10000) return gitCache.info;
   const run = (args) => {
     try {
-      return execFileSync('git', ['-C', cwd, ...args], {
+      return execFileSync('git', ['-C', CWD, ...args], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000,
       }).trim();
-    } catch (e) {
-      return null;
-    }
+    } catch { return null; }
   };
-  return {
-    branch: run(['rev-parse', '--abbrev-ref', 'HEAD']),
-    head: run(['rev-parse', '--short', 'HEAD']),
+  gitCache = {
+    at: Date.now(),
+    info: { branch: run(['rev-parse', '--abbrev-ref', 'HEAD']), head: run(['rev-parse', '--short', 'HEAD']) },
   };
-}
-
-function heartbeat(extra = {}) {
-  const prev = loadSession(NAME) || {};
-  const git = gitInfo(CWD);
-  writeJSONAtomic(sessionFile(NAME), {
-    state: 'idle',
-    role: ROLE,
-    task: '',
-    detail: '',
-    progress: '',
-    ...prev,
-    ...extra,
-    name: NAME,
-    pid: process.pid,
-    cwd: CWD,
-    branch: git.branch,
-    head: git.head,
-    last_seen: nowISO(),
-    joined_at: prev.joined_at || nowISO(),
-  });
-}
-
-function describeSession(s, verbose = false) {
-  const online = Date.now() - Date.parse(s.last_seen || 0) < OFFLINE_AFTER_MS;
-  const lines = [
-    `${online ? '🟢' : '⚪'} ${s.name}${s.name === NAME ? ' (moi)' : ''}` +
-      `${s.role ? ` — ${s.role}` : ''} [${s.state || 'idle'}] (vu ${ago(s.last_seen)})`,
-  ];
-  if (s.task) lines.push(`   tâche : ${s.task}${s.progress ? ` (${s.progress})` : ''}`);
-  if (s.detail) lines.push(`   détail : ${s.detail}`);
-  if (verbose) {
-    lines.push(`   cwd : ${s.cwd}`);
-    lines.push(`   branche : ${s.branch || '?'} @ ${s.head || '?'}`);
-    lines.push(`   rejoint : ${s.joined_at} | pid ${s.pid}`);
-  }
-  return lines.join('\n');
+  return gitCache.info;
 }
 
 // ---------------------------------------------------------------------------
-// Messagerie
-// ---------------------------------------------------------------------------
-
-function inboxNewDir(name) { return path.join(INBOX_DIR, name, 'new'); }
-function inboxReadDir(name) { return path.join(INBOX_DIR, name, 'read'); }
-
-function deliver(to, msg) {
-  const dir = inboxNewDir(to);
-  ensureDir(dir);
-  const file = path.join(dir, `${Date.now()}-${msg.id}.json`);
-  writeJSONAtomic(file, msg);
-}
-
-function sendMessage({ to, kind = 'message', subject = '', body, reply_to = null }) {
-  const sessions = listSessions();
-  let targets;
-  if (to === '*' || to === 'all') {
-    targets = sessions.map((s) => s.name).filter((n) => n !== NAME);
-    if (targets.length === 0) throw new Error('Aucun pair connecté pour le broadcast.');
-  } else {
-    const t = sanitizeName(to);
-    if (!sessions.some((s) => s.name === t)) {
-      const known = sessions.map((s) => s.name).join(', ') || '(aucune session)';
-      throw new Error(`Pair inconnu : "${to}". Sessions enregistrées : ${known}`);
-    }
-    targets = [t];
-  }
-  const msg = {
-    id: crypto.randomBytes(4).toString('hex'),
-    from: NAME,
-    kind,
-    subject,
-    body,
-    reply_to,
-    ts: nowISO(),
-  };
-  for (const t of targets) deliver(t, { ...msg, to: t });
-  return { msg, targets };
-}
-
-function countNewMessages(name) { return listDir(inboxNewDir(name)).length; }
-
-function readInbox(name, { consume = true } = {}) {
-  const dir = inboxNewDir(name);
-  const files = listDir(dir).sort();
-  const msgs = [];
-  for (const f of files) {
-    const full = path.join(dir, f);
-    const m = readJSON(full, null);
-    if (m) msgs.push(m);
-    if (consume) {
-      ensureDir(inboxReadDir(name));
-      try { fs.renameSync(full, path.join(inboxReadDir(name), f)); } catch { /* ignore */ }
-    }
-  }
-  return msgs;
-}
-
-function formatMessage(m) {
-  const kindIcon = {
-    message: '💬', question: '❓', status_request: '📊', diff_request: '🔀',
-    notify: '🔔', alert: '🚨', task: '📋',
-  }[m.kind] || '💬';
-  const head = `${kindIcon} [${m.id}] de ${m.from} (${ago(m.ts)})` +
-    `${m.kind !== 'message' ? ` · type=${m.kind}` : ''}` +
-    `${m.reply_to ? ` · réponse à ${m.reply_to}` : ''}` +
-    `${m.subject ? `\n   objet : ${m.subject}` : ''}`;
-  return `${head}\n${String(m.body).split('\n').map((l) => '   ' + l).join('\n')}`;
-}
-
-function inboxFooter() {
-  const n = countNewMessages(NAME);
-  return n > 0
-    ? `\n\n📬 ${n} message(s) non lu(s) dans ta boîte — appelle comm_inbox pour les lire.`
-    : '';
-}
-
-// ---------------------------------------------------------------------------
-// Tableau de tâches
-// ---------------------------------------------------------------------------
-
-function loadTasks() { return readJSON(TASKS_FILE, { next_id: 1, tasks: [] }); }
-function saveTasks(t) { writeJSONAtomic(TASKS_FILE, t); }
-
-function formatTask(t) {
-  const icon = { todo: '⬜', in_progress: '🔵', done: '✅', blocked: '🟥' }[t.status] || '⬜';
-  let line = `${icon} ${t.id} [${t.status}] ${t.title}`;
-  if (t.owner) line += ` — pris par ${t.owner}`;
-  if (t.detail) line += `\n     ${t.detail}`;
-  if (t.notes && t.notes.length) {
-    line += '\n' + t.notes.slice(-3).map((n) => `     · ${n}`).join('\n');
-  }
-  return line;
-}
-
-function notifyPeers(subject, body) {
-  try { sendMessage({ to: '*', kind: 'notify', subject, body }); }
-  catch { /* aucun pair : pas grave */ }
-}
-
-// ---------------------------------------------------------------------------
-// Verrous de fichiers
-// ---------------------------------------------------------------------------
-
-function lockId(p) {
-  return crypto.createHash('sha1').update(normalizePath(p)).digest('hex').slice(0, 16);
-}
-
-function normalizePath(p) { return String(p).replace(/\\/g, '/').replace(/\/+$/, ''); }
-
-function pathsOverlap(a, b) {
-  a = normalizePath(a); b = normalizePath(b);
-  if (a === b) return true;
-  return a.startsWith(b + '/') || b.startsWith(a + '/');
-}
-
-function listLocks() {
-  return listDir(LOCKS_DIR)
-    .filter((f) => f.endsWith('.json'))
-    .map((f) => readJSON(path.join(LOCKS_DIR, f), null))
-    .filter(Boolean);
-}
-
-// ---------------------------------------------------------------------------
-// Diff git d'un pair
+// Diff / fichier locaux (utilisés en direct et comme services auto-répondus)
 // ---------------------------------------------------------------------------
 
 function gitRun(cwd, args) {
@@ -337,15 +149,14 @@ function gitRun(cwd, args) {
   }
 }
 
-function peerDiff(session, mode, pathFilter) {
-  const cwd = session.cwd;
+function localDiff(cwd, label, mode, pathFilter) {
   if (!cwd || !fs.existsSync(cwd)) {
-    return `Le répertoire de ${session.name} (${cwd}) n'est pas accessible depuis cette machine.`;
+    return `Le répertoire de ${label} (${cwd}) n'est pas accessible.`;
   }
-  const filter = pathFilter ? ['--', pathFilter] : [];
+  const filter = pathFilter ? ['--', String(pathFilter)] : [];
   const parts = [];
   const status = gitRun(cwd, ['status', '-sb']);
-  parts.push(`# ${session.name} — ${cwd} (branche ${session.branch || '?'})`);
+  parts.push(`# ${label} — ${cwd}`);
   parts.push(`## git status -sb\n${status.out.trim() || '(propre)'}`);
 
   const hasHead = gitRun(cwd, ['rev-parse', '--verify', 'HEAD']).ok;
@@ -364,6 +175,426 @@ function peerDiff(session, mode, pathFilter) {
     parts.push(`## fichiers non suivis\n${untracked.out.trim()}`);
   }
   return truncate(parts.join('\n\n'));
+}
+
+function localFile(cwd, rel) {
+  if (!rel) throw new Error('Paramètre requis : path.');
+  const abs = path.resolve(cwd, String(rel));
+  if (abs !== cwd && !abs.startsWith(cwd + path.sep)) {
+    throw new Error('Chemin refusé : en dehors du répertoire de travail du pair.');
+  }
+  let st;
+  try { st = fs.statSync(abs); } catch { throw new Error(`Fichier introuvable : ${rel}`); }
+  if (st.isDirectory()) {
+    const entries = listDir(abs).slice(0, 200);
+    return `# ${rel}/ (dossier, ${entries.length} entrées)\n${entries.join('\n')}`;
+  }
+  const size = st.size;
+  const fd = fs.openSync(abs, 'r');
+  let buf;
+  try {
+    buf = Buffer.alloc(Math.min(size, MAX_FILE_BYTES));
+    fs.readSync(fd, buf, 0, buf.length, 0);
+  } finally { fs.closeSync(fd); }
+  if (buf.includes(0)) return `# ${rel} (${size} octets) — fichier binaire, contenu non transmis.`;
+  const note = size > MAX_FILE_BYTES ? `\n... [tronqué : fichier de ${size} octets, ${MAX_FILE_BYTES} transmis]` : '';
+  return `# ${rel} (${size} octets)\n${buf.toString('utf8')}${note}`;
+}
+
+// Services auto-répondus par cette instance quand un pair les demande
+// (sans intervention du modèle de cette session).
+const SERVICES = {
+  ping: async () => `pong de ${NAME}@${HOSTNAME} (${nowISO()})`,
+  diff: async (p) => localDiff(CWD, NAME, (p && p.mode) || 'stat', p && p.path),
+  file: async (p) => localFile(CWD, p && p.path),
+};
+
+// ---------------------------------------------------------------------------
+// Backend FICHIER (même machine / montage partagé)
+// ---------------------------------------------------------------------------
+
+function sessionFile(name) { return path.join(SESSIONS_DIR, `${name}.json`); }
+function inboxNewDir(name) { return path.join(INBOX_DIR, name, 'new'); }
+function inboxReadDir(name) { return path.join(INBOX_DIR, name, 'read'); }
+
+async function withStateLock(fn) {
+  for (let i = 0; i < 100; i++) {
+    try { fs.mkdirSync(STATE_LOCK); break; }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try {
+        const st = fs.statSync(STATE_LOCK);
+        if (Date.now() - st.mtimeMs > 30000) { fs.rmdirSync(STATE_LOCK); continue; }
+      } catch { /* disparu entre-temps */ }
+      if (i === 99) throw new Error("Impossible d'obtenir le verrou d'état du canal.");
+      await sleep(25);
+    }
+  }
+  try { return await fn(); }
+  finally { try { fs.rmdirSync(STATE_LOCK); } catch { /* ignore */ } }
+}
+
+function fileListSessions() {
+  return listDir(SESSIONS_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => readJSON(path.join(SESSIONS_DIR, f), null))
+    .filter(Boolean)
+    .sort((a, b) => (a.name < b.name ? -1 : 1));
+}
+
+function fileDeliver(to, msg) {
+  const dir = inboxNewDir(to);
+  ensureDir(dir);
+  writeJSONAtomic(path.join(dir, `${Date.now()}-${msg.id}.json`), msg);
+}
+
+function fileNotify(op) {
+  if (!op || !op.notify) return;
+  for (const s of fileListSessions()) {
+    if (s.name === NAME) continue;
+    fileDeliver(s.name, {
+      id: newId(), from: NAME, to: s.name, kind: 'notify',
+      subject: op.notify.subject, body: op.notify.body, reply_to: null, ts: nowISO(),
+    });
+  }
+}
+
+function fileReadInbox(consume) {
+  const dir = inboxNewDir(NAME);
+  const files = listDir(dir).sort();
+  const msgs = [];
+  for (const f of files) {
+    const full = path.join(dir, f);
+    const m = readJSON(full, null);
+    if (m) msgs.push(m);
+    if (consume) {
+      ensureDir(inboxReadDir(NAME));
+      try { fs.renameSync(full, path.join(inboxReadDir(NAME), f)); } catch { /* ignore */ }
+    }
+  }
+  return msgs;
+}
+
+function stripVolatile(s) {
+  const { last_seen, live, ...rest } = s || {};
+  return rest;
+}
+
+function fileSnapshot() {
+  const sessions = fileListSessions();
+  const tasks = readJSON(TASKS_FILE, emptyTasks());
+  const locks = readJSON(LOCKS_FILE, []);
+  const stable = JSON.stringify({ s: sessions.map(stripVolatile), t: tasks, l: locks });
+  return {
+    version: crypto.createHash('sha1').update(stable).digest('hex'),
+    sessions, tasks, locks,
+    inbox_counts: Object.fromEntries(sessions.map((s) => [s.name, listDir(inboxNewDir(s.name)).length])),
+  };
+}
+
+const fileApi = {
+  mode: 'file',
+
+  async heartbeat(patch = {}) {
+    const prev = readJSON(sessionFile(NAME), {});
+    const git = gitInfo();
+    const session = {
+      state: 'idle', role: ROLE, task: '', detail: '', progress: '',
+      ...prev, ...patch,
+      name: NAME, pid: process.pid, cwd: CWD, host: HOSTNAME,
+      branch: git.branch, head: git.head,
+      last_seen: nowISO(), joined_at: prev.joined_at || nowISO(),
+    };
+    writeJSONAtomic(sessionFile(NAME), session);
+    return session;
+  },
+
+  async sessions() { return fileListSessions(); },
+
+  async session(name) { return readJSON(sessionFile(sanitizeName(name)), null); },
+
+  async send({ to, kind = 'message', subject = '', body, reply_to = null }) {
+    const sessions = fileListSessions();
+    let targets;
+    if (to === '*' || to === 'all') {
+      targets = sessions.map((s) => s.name).filter((n) => n !== NAME);
+      if (!targets.length) throw new Error('Aucun pair connecté pour le broadcast.');
+    } else {
+      const t = sanitizeName(to);
+      if (!sessions.some((s) => s.name === t)) {
+        const known = sessions.map((s) => s.name).join(', ') || '(aucune session)';
+        throw new Error(`Pair inconnu : "${to}". Sessions enregistrées : ${known}`);
+      }
+      targets = [t];
+    }
+    const msg = { id: newId(), from: NAME, kind, subject, body, reply_to, ts: nowISO() };
+    for (const t of targets) fileDeliver(t, { ...msg, to: t });
+    return { id: msg.id, kind, targets };
+  },
+
+  async inboxCount() { return listDir(inboxNewDir(NAME)).length; },
+
+  async inboxRead({ consume = true, waitSeconds = 0 } = {}) {
+    const deadline = Date.now() + waitSeconds * 1000;
+    let msgs = fileReadInbox(consume);
+    while (!msgs.length && Date.now() < deadline) {
+      await sleep(1000);
+      await this.heartbeat();
+      msgs = fileReadInbox(consume);
+    }
+    return msgs;
+  },
+
+  async taskOp(a) {
+    return withStateLock(async () => {
+      const db = readJSON(TASKS_FILE, emptyTasks());
+      const op = applyTaskAction(db, NAME, a);
+      if (op.changed) writeJSONAtomic(TASKS_FILE, db);
+      fileNotify(op);
+      return op.result;
+    });
+  },
+
+  async lockOp(a) {
+    return withStateLock(async () => {
+      const locks = readJSON(LOCKS_FILE, []);
+      const op = applyLockAction(locks, NAME, a);
+      if (op.changed) writeJSONAtomic(LOCKS_FILE, op.locks);
+      fileNotify(op);
+      return op.result;
+    });
+  },
+
+  async noteOp(a) {
+    return withStateLock(async () => {
+      const notes = readJSON(NOTES_FILE, []);
+      const op = applyNoteAction(notes, NAME, a);
+      if (op.changed) writeJSONAtomic(NOTES_FILE, notes);
+      fileNotify(op);
+      return op.result;
+    });
+  },
+
+  async snapshot() { return fileSnapshot(); },
+
+  async waitChange(version, seconds) {
+    const deadline = Date.now() + seconds * 1000;
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      const snap = fileSnapshot();
+      if (snap.version !== version) return snap;
+    }
+    return null;
+  },
+
+  async peerDiff(peer, { mode, path: p }) {
+    const s = await this.session(peer);
+    if (!s) throw new Error(`Pair inconnu : "${peer}".`);
+    if (s.host && s.host !== HOSTNAME) {
+      throw new Error(`${s.name} tourne sur une autre machine (${s.host}). Utilise le mode relais (CLAUDE_COMM_RELAY) pour le multi-machines.`);
+    }
+    return localDiff(s.cwd, `${s.name} (branche ${s.branch || '?'})`, mode, p);
+  },
+
+  async peerFile(peer, { path: p }) {
+    const s = await this.session(peer);
+    if (!s) throw new Error(`Pair inconnu : "${peer}".`);
+    if (s.host && s.host !== HOSTNAME) {
+      throw new Error(`${s.name} tourne sur une autre machine (${s.host}). Utilise le mode relais (CLAUDE_COMM_RELAY) pour le multi-machines.`);
+    }
+    return localFile(s.cwd, p);
+  },
+
+  startBackground() { /* rien : tout est lisible directement sur disque */ },
+};
+
+// ---------------------------------------------------------------------------
+// Backend RELAIS (multi-machines, sécurisé)
+// ---------------------------------------------------------------------------
+
+async function rfetch(method, p, body, timeoutMs = 35000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    let res;
+    try {
+      res = await fetch(`${RELAY_URL}/c/${CHANNEL}${p}`, {
+        method,
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: ctl.signal,
+      });
+    } catch (e) {
+      throw new Error(`Relais injoignable (${RELAY_URL}) : ${e.cause?.code || e.message}`);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Relais : HTTP ${res.status}`);
+    return data;
+  } finally { clearTimeout(timer); }
+}
+
+const relayApi = {
+  mode: 'relay',
+
+  async heartbeat(patch = {}) {
+    const git = gitInfo();
+    const data = await rfetch('POST', `/sessions/${NAME}`, {
+      ...patch, cwd: CWD, host: HOSTNAME, pid: process.pid,
+      branch: git.branch, head: git.head,
+      ...(patch.role === undefined && ROLE ? { role: ROLE } : {}),
+    });
+    return data.session;
+  },
+
+  async sessions() { return (await rfetch('GET', '/sessions')).sessions; },
+
+  async session(name) {
+    const all = await this.sessions();
+    return all.find((s) => s.name === sanitizeName(name)) || null;
+  },
+
+  async send({ to, kind = 'message', subject = '', body, reply_to = null }) {
+    return rfetch('POST', '/messages', { from: NAME, to, kind, subject, body, reply_to });
+  },
+
+  async inboxCount() { return (await rfetch('GET', `/inbox/${NAME}/count`)).count; },
+
+  async inboxRead({ consume = true, waitSeconds = 0 } = {}) {
+    const deadline = Date.now() + waitSeconds * 1000;
+    const consumeQ = consume ? '&consume=1' : '';
+    for (;;) {
+      const remaining = Math.ceil((deadline - Date.now()) / 1000);
+      const wait = Math.max(Math.min(remaining, 25), 0);
+      const data = await rfetch('GET', `/inbox/${NAME}?wait=${wait}${consumeQ}`, null, (wait + 15) * 1000);
+      if (data.messages.length || Date.now() >= deadline) return data.messages;
+    }
+  },
+
+  async taskOp(a) { return (await rfetch('POST', '/tasks', { ...a, actor: NAME })).result; },
+  async lockOp(a) { return (await rfetch('POST', '/locks', { ...a, actor: NAME })).result; },
+  async noteOp(a) { return (await rfetch('POST', '/notes', { ...a, actor: NAME })).result; },
+
+  async snapshot() { return rfetch('GET', '/state'); },
+
+  async waitChange(version, seconds) {
+    const wait = Math.max(Math.min(seconds, 30), 1);
+    const snap = await rfetch('GET', `/state?version=${version}&wait=${wait}`, null, (wait + 15) * 1000);
+    return snap.version === version ? null : snap;
+  },
+
+  async service(target, action, params) {
+    const t = sanitizeName(target);
+    const data = await rfetch('POST', `/service/${t}`, { from: NAME, action, params }, 45000);
+    if (!data.ok) {
+      const detail = typeof data.result === 'string' ? data.result.replace(/^❌\s*/, '') : null;
+      throw new Error(data.error || detail || `${t} n'a pas pu répondre.`);
+    }
+    return data.result;
+  },
+
+  async peerDiff(peer, { mode, path: p }) {
+    return this.service(peer, 'diff', { mode, path: p });
+  },
+
+  async peerFile(peer, { path: p }) {
+    return this.service(peer, 'file', { path: p });
+  },
+
+  // Boucle de service : répond automatiquement aux demandes de diff/fichier
+  // des pairs, sans intervention du modèle de cette session.
+  startBackground() {
+    if (this._loop) return;
+    this._loop = (async () => {
+      for (;;) {
+        try {
+          const data = await rfetch('GET', `/service-poll/${NAME}?wait=25`, null, 40000);
+          if (data && data.request) {
+            const { id, action, params } = data.request;
+            let ok = true, result;
+            try {
+              const fn = SERVICES[action];
+              if (!fn) throw new Error(`Service inconnu : ${action}`);
+              result = await fn(params || {});
+            } catch (e) { ok = false; result = `❌ ${e.message}`; }
+            await rfetch('POST', '/service-reply', { id, ok, result });
+          }
+        } catch { await sleep(3000); }
+      }
+    })();
+  },
+};
+
+const api = MODE === 'relay' ? relayApi : fileApi;
+
+// ---------------------------------------------------------------------------
+// Mise en forme
+// ---------------------------------------------------------------------------
+
+function isOnline(s) {
+  if (typeof s.live === 'boolean') return s.live;
+  return Date.now() - Date.parse(s.last_seen || 0) < OFFLINE_AFTER_MS;
+}
+
+function describeSession(s, verbose = false) {
+  const lines = [
+    `${isOnline(s) ? '🟢' : '⚪'} ${s.name}${s.name === NAME ? ' (moi)' : ''}` +
+      `${s.role ? ` — ${s.role}` : ''} [${s.state || 'idle'}] (vu ${ago(s.last_seen)})`,
+  ];
+  if (s.task) lines.push(`   tâche : ${s.task}${s.progress ? ` (${s.progress})` : ''}`);
+  if (s.detail) lines.push(`   détail : ${s.detail}`);
+  if (verbose) {
+    lines.push(`   machine : ${s.host || '?'} | cwd : ${s.cwd}`);
+    lines.push(`   branche : ${s.branch || '?'} @ ${s.head || '?'}`);
+    lines.push(`   rejoint : ${s.joined_at} | pid ${s.pid}`);
+  }
+  return lines.join('\n');
+}
+
+function formatMessage(m) {
+  const kindIcon = {
+    message: '💬', question: '❓', status_request: '📊', diff_request: '🔀',
+    notify: '🔔', alert: '🚨', task: '📋',
+  }[m.kind] || '💬';
+  const head = `${kindIcon} [${m.id}] de ${m.from} (${ago(m.ts)})` +
+    `${m.kind !== 'message' ? ` · type=${m.kind}` : ''}` +
+    `${m.reply_to ? ` · réponse à ${m.reply_to}` : ''}` +
+    `${m.subject ? `\n   objet : ${m.subject}` : ''}`;
+  return `${head}\n${String(m.body).split('\n').map((l) => '   ' + l).join('\n')}`;
+}
+
+function formatTask(t) {
+  const icon = { todo: '⬜', in_progress: '🔵', done: '✅', blocked: '🟥' }[t.status] || '⬜';
+  let line = `${icon} ${t.id} [${t.status}] ${t.title}`;
+  if (t.owner) line += ` — pris par ${t.owner}`;
+  if (t.detail) line += `\n     ${t.detail}`;
+  if (t.notes && t.notes.length) {
+    line += '\n' + t.notes.slice(-3).map((n) => `     · ${n}`).join('\n');
+  }
+  return line;
+}
+
+function formatBoard(tasks) {
+  if (!tasks.length) return 'Tableau vide. Ajoute des tâches avec comm_task action=add.';
+  const open = tasks.filter((t) => t.status !== 'done');
+  const done = tasks.filter((t) => t.status === 'done');
+  let out = `📋 Tableau de tâches (canal "${CHANNEL}") :\n\n` +
+    (open.length ? open.map(formatTask).join('\n') : '(aucune tâche ouverte)');
+  if (done.length) out += `\n\nTerminées :\n${done.map(formatTask).join('\n')}`;
+  return out;
+}
+
+async function inboxFooter() {
+  try {
+    const n = await api.inboxCount();
+    return n > 0
+      ? `\n\n📬 ${n} message(s) non lu(s) dans ta boîte — appelle comm_inbox pour les lire.`
+      : '';
+  } catch { return ''; }
+}
+
+async function notifyPeers(subject, body) {
+  try { await api.send({ to: '*', kind: 'notify', subject, body }); }
+  catch { /* aucun pair : pas grave */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,11 +618,11 @@ const TOOLS = [
   {
     name: 'comm_peers',
     description:
-      'Lister toutes les sessions Claude du canal avec leur état live : statut, tâche en cours, progression, branche git, dernière activité.',
+      'Lister toutes les sessions Claude du canal avec leur état live : statut, tâche en cours, progression, machine, branche git, dernière activité.',
     inputSchema: {
       type: 'object',
       properties: {
-        verbose: { type: 'boolean', description: 'Inclure cwd, branche, pid (défaut: false)' },
+        verbose: { type: 'boolean', description: 'Inclure machine, cwd, branche, pid (défaut: false)' },
       },
     },
   },
@@ -418,7 +649,7 @@ const TOOLS = [
   {
     name: 'comm_inbox',
     description:
-      "Lire les messages reçus des autres sessions. Avec wait_seconds > 0, attend l'arrivée d'un message (poll bloquant) — utile pour se synchroniser en direct. Réponds aux questions/status_request/diff_request reçus via comm_send avec reply_to.",
+      "Lire les messages reçus des autres sessions. Avec wait_seconds > 0, attend l'arrivée d'un message (bloquant) — utile pour se synchroniser en direct. Réponds aux questions/status_request/diff_request reçus via comm_send avec reply_to.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -457,7 +688,7 @@ const TOOLS = [
   {
     name: 'comm_diff',
     description:
-      "Obtenir le diff git en direct du worktree d'un pair (lecture directe, sans le déranger) : status, modifications, fichiers non suivis. Modes : stat (résumé), files (liste), full (diff complet).",
+      "Obtenir le diff git en direct du worktree d'un pair, sans le déranger : status, modifications, fichiers non suivis. Fonctionne aussi entre machines (mode relais : son instance répond automatiquement). Modes : stat (résumé), files (liste), full (diff complet).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -466,6 +697,19 @@ const TOOLS = [
         path: { type: 'string', description: 'Limiter à un chemin (optionnel)' },
       },
       required: ['peer'],
+    },
+  },
+  {
+    name: 'comm_file',
+    description:
+      "Lire un fichier (ou lister un dossier) du worktree d'un pair, en lecture seule — utile pour voir sa version d'un fichier avant de coordonner une interface commune. Plafonné à 100 Ko, contenu binaire refusé, chemin confiné à son répertoire de travail.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        peer: { type: 'string', description: 'Nom du pair' },
+        path: { type: 'string', description: 'Chemin relatif à son répertoire de travail' },
+      },
+      required: ['peer', 'path'],
     },
   },
   {
@@ -500,6 +744,22 @@ const TOOLS = [
     },
   },
   {
+    name: 'comm_note',
+    description:
+      "Journal partagé de décisions et conventions de l'équipe (persiste pour toutes les sessions). Note les décisions d'architecture, les interfaces convenues, les pièges découverts. Actions : add (les pairs sont notifiés), list (filtrable par tag).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['add', 'list'], description: 'Action' },
+        text: { type: 'string', description: 'Contenu de la note (pour add)' },
+        tags: { type: 'array', items: { type: 'string' }, description: "Tags (ex: ['api', 'decision'])" },
+        tag: { type: 'string', description: 'Filtrer par tag (pour list)' },
+        limit: { type: 'number', description: 'Nombre max de notes (pour list, défaut: 20)' },
+      },
+      required: ['action'],
+    },
+  },
+  {
     name: 'comm_wait',
     description:
       "Attente bloquante d'un événement pour se synchroniser en direct : until=message (un message arrive), peer_status (l'état d'un pair change), tasks (le tableau de tâches change), locks (des chemins se libèrent). Retourne dès que l'événement survient ou à expiration du timeout.",
@@ -522,57 +782,44 @@ const TOOLS = [
 
 const HANDLERS = {
   async comm_join(a = {}) {
-    const existing = loadSession(NAME);
-    let warning = '';
-    if (existing && existing.pid !== process.pid &&
-        Date.now() - Date.parse(existing.last_seen || 0) < 60000) {
-      warning = `\n⚠️ Une autre session utilisait le nom "${NAME}" il y a moins d'une minute (pid ${existing.pid}). ` +
-        `Si ce n'est pas un redémarrage, relance avec CLAUDE_COMM_NAME=<autre-nom>.`;
-    }
-    heartbeat({
-      role: a.role !== undefined ? a.role : (existing && existing.role) || ROLE,
-      task: a.task !== undefined ? a.task : (existing && existing.task) || '',
+    const session = await api.heartbeat({
+      ...(a.role !== undefined ? { role: a.role } : {}),
+      ...(a.task !== undefined ? { task: a.task } : {}),
       state: a.task ? 'working' : 'idle',
     });
     if (a.announce !== false) {
-      notifyPeers('arrivée', `${NAME} a rejoint le canal "${CHANNEL}"${a.role ? ` (rôle : ${a.role})` : ''}${a.task ? ` — démarre : ${a.task}` : ''}.`);
+      await notifyPeers('arrivée',
+        `${NAME} a rejoint le canal "${CHANNEL}"${a.role ? ` (rôle : ${a.role})` : ''}${a.task ? ` — démarre : ${a.task}` : ''}.`);
     }
-    const others = listSessions().filter((s) => s.name !== NAME);
+    const others = (await api.sessions()).filter((s) => s.name !== NAME);
     const peersTxt = others.length
       ? `Pairs présents :\n${others.map((s) => describeSession(s)).join('\n')}`
       : 'Aucun autre pair pour le moment. Ils te verront dès leur comm_join.';
-    return `✅ Connecté au canal "${CHANNEL}" en tant que "${NAME}".${warning}\n\n${peersTxt}\n\n` +
-      `Hub : ${CHAN_DIR}\nPense à publier ton état (comm_status_set) et à relever ta boîte (comm_inbox) régulièrement.`;
+    const where = MODE === 'relay' ? `relais ${RELAY_URL}` : `hub ${CHAN_DIR}`;
+    return `✅ Connecté au canal "${CHANNEL}" en tant que "${session.name}" (${where}, machine ${HOSTNAME}).\n\n${peersTxt}\n\n` +
+      `Pense à publier ton état (comm_status_set) et à relever ta boîte (comm_inbox) régulièrement.`;
   },
 
   async comm_peers(a = {}) {
-    const sessions = listSessions();
+    const sessions = await api.sessions();
     if (!sessions.length) return 'Aucune session enregistrée sur ce canal.';
     return sessions.map((s) => describeSession(s, !!a.verbose)).join('\n');
   },
 
   async comm_send(a) {
     if (!a || !a.to || !a.body) throw new Error('Paramètres requis : to, body.');
-    const { msg, targets } = sendMessage(a);
-    const hint = a.kind === 'question' || a.kind === 'status_request' || a.kind === 'diff_request'
+    const r = await api.send(a);
+    const hint = ['question', 'status_request', 'diff_request'].includes(a.kind)
       ? `\nPour attendre la réponse en direct : comm_inbox avec wait_seconds (ex: 60).`
       : '';
-    return `📤 Message ${msg.id} (${msg.kind}) envoyé à ${targets.join(', ')}.${hint}`;
+    return `📤 Message ${r.id} (${r.kind || a.kind || 'message'}) envoyé à ${r.targets.join(', ')}.${hint}`;
   },
 
   async comm_inbox(a = {}) {
     const wait = Math.min(Math.max(Number(a.wait_seconds) || 0, 0), MAX_WAIT_S);
-    const deadline = Date.now() + wait * 1000;
-    let msgs = readInbox(NAME, { consume: !a.peek });
-    while (!msgs.length && Date.now() < deadline) {
-      await sleep(1000);
-      heartbeat();
-      msgs = readInbox(NAME, { consume: !a.peek });
-    }
+    const msgs = await api.inboxRead({ consume: !a.peek, waitSeconds: wait });
     if (!msgs.length) {
-      return wait > 0
-        ? `⏳ Aucun message après ${wait}s d'attente.`
-        : '📭 Boîte vide.';
+      return wait > 0 ? `⏳ Aucun message après ${wait}s d'attente.` : '📭 Boîte vide.';
     }
     const toAnswer = msgs.filter((m) => ['question', 'status_request', 'diff_request'].includes(m.kind));
     let footer = '';
@@ -593,10 +840,10 @@ const HANDLERS = {
     if (a.task !== undefined) patch.task = a.task;
     if (a.detail !== undefined) patch.detail = a.detail;
     if (a.progress !== undefined) patch.progress = a.progress;
-    heartbeat(patch);
+    await api.heartbeat(patch);
     const shouldNotify = a.notify === true || (a.notify !== false && (a.state === 'blocked' || a.state === 'done'));
     if (shouldNotify) {
-      notifyPeers(`état : ${a.state}`,
+      await notifyPeers(`état : ${a.state}`,
         `${NAME} est passé à "${a.state}"${a.task ? ` sur : ${a.task}` : ''}` +
         `${a.progress ? ` (${a.progress})` : ''}${a.detail ? `\n${a.detail}` : ''}`);
     }
@@ -606,319 +853,264 @@ const HANDLERS = {
 
   async comm_status_get(a = {}) {
     if (a.peer) {
-      const s = loadSession(sanitizeName(a.peer));
+      const s = await api.session(a.peer);
       if (!s) throw new Error(`Pair inconnu : "${a.peer}".`);
       return describeSession(s, true);
     }
-    const others = listSessions().filter((s) => s.name !== NAME);
+    const others = (await api.sessions()).filter((s) => s.name !== NAME);
     if (!others.length) return 'Aucun pair sur ce canal.';
     return others.map((s) => describeSession(s, true)).join('\n\n');
   },
 
   async comm_diff(a) {
     if (!a || !a.peer) throw new Error('Paramètre requis : peer.');
-    const s = loadSession(sanitizeName(a.peer));
-    if (!s) throw new Error(`Pair inconnu : "${a.peer}".`);
-    return peerDiff(s, a.mode || 'stat', a.path);
+    return api.peerDiff(a.peer, { mode: a.mode || 'stat', path: a.path });
+  },
+
+  async comm_file(a) {
+    if (!a || !a.peer || !a.path) throw new Error('Paramètres requis : peer, path.');
+    return api.peerFile(a.peer, { path: a.path });
   },
 
   async comm_task(a) {
     if (!a || !a.action) throw new Error('Paramètre requis : action.');
-    return withTasksLock(async () => {
-      const db = loadTasks();
-      const find = (id) => {
-        const t = db.tasks.find((t) => t.id === String(id).toUpperCase());
-        if (!t) throw new Error(`Tâche inconnue : "${id}". Utilise comm_task action=list.`);
-        return t;
-      };
-      const touch = (t, note) => {
-        t.updated_at = nowISO();
-        if (note) (t.notes = t.notes || []).push(`[${NAME}] ${note}`);
-      };
-
-      switch (a.action) {
-        case 'add': {
-          if (!a.title) throw new Error('Paramètre requis pour add : title.');
-          const t = {
-            id: `T${db.next_id++}`, title: a.title, detail: a.detail || '',
-            status: 'todo', owner: null, created_by: NAME,
-            created_at: nowISO(), updated_at: nowISO(), notes: [],
-          };
-          db.tasks.push(t);
-          saveTasks(db);
-          notifyPeers('nouvelle tâche', `${NAME} a ajouté ${t.id} : ${t.title}`);
-          return `✅ Tâche créée :\n${formatTask(t)}`;
-        }
-        case 'list': {
-          if (!db.tasks.length) return 'Tableau vide. Ajoute des tâches avec comm_task action=add.';
-          const open = db.tasks.filter((t) => t.status !== 'done');
-          const done = db.tasks.filter((t) => t.status === 'done');
-          let out = `📋 Tableau de tâches (canal "${CHANNEL}") :\n\n` +
-            (open.length ? open.map(formatTask).join('\n') : '(aucune tâche ouverte)');
-          if (done.length) out += `\n\nTerminées :\n${done.map(formatTask).join('\n')}`;
-          return out;
-        }
-        case 'next': {
-          const t = db.tasks.find((t) => t.status === 'todo' && !t.owner);
-          if (!t) return 'Aucune tâche libre. Vérifie comm_task action=list ou ajoute des tâches.';
-          t.owner = NAME; t.status = 'in_progress';
-          touch(t, 'prise (next)');
-          saveTasks(db);
-          heartbeat({ state: 'working', task: `${t.id}: ${t.title}` });
-          notifyPeers('tâche prise', `${NAME} prend ${t.id} : ${t.title}`);
-          return `🔵 Tu prends :\n${formatTask(t)}`;
-        }
-        case 'claim': {
-          const t = find(a.id);
-          if (t.owner && t.owner !== NAME) {
-            throw new Error(`${t.id} est déjà prise par ${t.owner}. Choisis-en une autre (action=next) ou demande-lui de la libérer.`);
-          }
-          t.owner = NAME; t.status = 'in_progress';
-          touch(t, 'prise (claim)');
-          saveTasks(db);
-          heartbeat({ state: 'working', task: `${t.id}: ${t.title}` });
-          notifyPeers('tâche prise', `${NAME} prend ${t.id} : ${t.title}`);
-          return `🔵 Tu prends :\n${formatTask(t)}`;
-        }
-        case 'update': {
-          const t = find(a.id);
-          if (a.status) t.status = a.status;
-          touch(t, a.note || (a.status ? `statut → ${a.status}` : 'mise à jour'));
-          saveTasks(db);
-          if (a.status === 'blocked') notifyPeers('tâche bloquée', `${NAME} : ${t.id} bloquée — ${a.note || t.title}`);
-          return `✅ Mise à jour :\n${formatTask(t)}`;
-        }
-        case 'done': {
-          const t = find(a.id);
-          t.status = 'done'; t.owner = t.owner || NAME;
-          touch(t, a.note || 'terminée');
-          saveTasks(db);
-          notifyPeers('tâche terminée', `${NAME} a terminé ${t.id} : ${t.title}${a.note ? `\n${a.note}` : ''}`);
-          const remaining = db.tasks.filter((x) => x.status !== 'done').length;
-          return `✅ ${t.id} terminée. ${remaining} tâche(s) restante(s).` +
-            (remaining ? ' Enchaîne avec comm_task action=next.' : ' 🎉 Tableau vide !');
-        }
-        case 'release': {
-          const t = find(a.id);
-          if (t.owner !== NAME) throw new Error(`${t.id} ne t'appartient pas (owner: ${t.owner || 'aucun'}).`);
-          t.owner = null; t.status = 'todo';
-          touch(t, a.note || 'libérée');
-          saveTasks(db);
-          notifyPeers('tâche libérée', `${NAME} a libéré ${t.id} : ${t.title}`);
-          return `↩️ ${t.id} rendue au tableau.`;
-        }
-        default:
-          throw new Error(`Action inconnue : ${a.action}`);
-      }
-    });
+    const r = await api.taskOp(a);
+    switch (r.type) {
+      case 'task':
+        return `${a.action === 'add' ? '✅ Tâche créée' : '✅ Mise à jour'} :\n${formatTask(r.task)}`;
+      case 'list':
+        return formatBoard(r.tasks);
+      case 'none':
+        return 'Aucune tâche libre. Vérifie comm_task action=list ou ajoute des tâches.';
+      case 'claimed':
+        await api.heartbeat({ state: 'working', task: `${r.task.id}: ${r.task.title}` });
+        return `🔵 Tu prends :\n${formatTask(r.task)}`;
+      case 'done':
+        return `✅ ${r.task.id} terminée. ${r.remaining} tâche(s) restante(s).` +
+          (r.remaining ? ' Enchaîne avec comm_task action=next.' : ' 🎉 Tableau vide !');
+      case 'released_task':
+        return `↩️ ${r.task.id} rendue au tableau.`;
+      default:
+        return JSON.stringify(r);
+    }
   },
 
   async comm_lock(a) {
     if (!a || !a.action) throw new Error('Paramètre requis : action.');
-    ensureDir(LOCKS_DIR);
-    switch (a.action) {
-      case 'acquire': {
-        if (!a.paths || !a.paths.length) throw new Error('Paramètre requis pour acquire : paths.');
-        const existing = listLocks();
-        const conflicts = [];
-        for (const p of a.paths) {
-          for (const l of existing) {
-            if (l.owner !== NAME && pathsOverlap(p, l.path)) {
-              conflicts.push(`"${p}" chevauche "${l.path}" verrouillé par ${l.owner} (${ago(l.ts)})${l.reason ? ` — ${l.reason}` : ''}`);
-            }
-          }
-        }
-        if (conflicts.length) {
-          return `🟥 Verrou refusé :\n- ${conflicts.join('\n- ')}\n\n` +
-            `Options : travaille ailleurs, demande au pair quand il libère (comm_send kind=question), ou attends avec comm_wait until=locks.`;
-        }
-        for (const p of a.paths) {
-          writeJSONAtomic(path.join(LOCKS_DIR, `${lockId(p)}.json`), {
-            path: normalizePath(p), owner: NAME, reason: a.reason || '', ts: nowISO(),
-          });
-        }
-        return `🔒 Verrouillé pour ${NAME} : ${a.paths.join(', ')}${a.reason ? ` (${a.reason})` : ''}\nLibère avec comm_lock action=release dès que tu as fini.`;
-      }
-      case 'release': {
-        const mine = listLocks().filter((l) => l.owner === NAME);
-        const targets = a.paths && a.paths.length
-          ? mine.filter((l) => a.paths.some((p) => normalizePath(p) === l.path))
-          : mine;
-        if (!targets.length) return 'Aucun verrou à libérer.';
-        for (const l of targets) {
-          try { fs.unlinkSync(path.join(LOCKS_DIR, `${lockId(l.path)}.json`)); } catch { /* ignore */ }
-        }
-        notifyPeers('verrous libérés', `${NAME} a libéré : ${targets.map((l) => l.path).join(', ')}`);
-        return `🔓 Libéré : ${targets.map((l) => l.path).join(', ')}`;
-      }
-      case 'list': {
-        const locks = listLocks();
-        if (!locks.length) return 'Aucun verrou actif.';
-        return '🔒 Verrous actifs :\n' + locks
+    const r = await api.lockOp(a);
+    switch (r.type) {
+      case 'conflict':
+        return `🟥 Verrou refusé :\n- ` + r.conflicts
+          .map((c) => `"${c.path}" chevauche "${c.lock.path}" verrouillé par ${c.lock.owner} (${ago(c.lock.ts)})${c.lock.reason ? ` — ${c.lock.reason}` : ''}`)
+          .join('\n- ') +
+          `\n\nOptions : travaille ailleurs, demande au pair quand il libère (comm_send kind=question), ou attends avec comm_wait until=locks.`;
+      case 'acquired':
+        return `🔒 Verrouillé pour ${NAME} : ${r.paths.join(', ')}${a.reason ? ` (${a.reason})` : ''}\nLibère avec comm_lock action=release dès que tu as fini.`;
+      case 'released':
+        return r.paths.length ? `🔓 Libéré : ${r.paths.join(', ')}` : 'Aucun verrou à libérer.';
+      case 'list':
+        if (!r.locks.length) return 'Aucun verrou actif.';
+        return '🔒 Verrous actifs :\n' + r.locks
           .map((l) => `- ${l.path} → ${l.owner}${l.owner === NAME ? ' (moi)' : ''} (${ago(l.ts)})${l.reason ? ` — ${l.reason}` : ''}`)
           .join('\n');
-      }
       default:
-        throw new Error(`Action inconnue : ${a.action}`);
+        return JSON.stringify(r);
     }
+  },
+
+  async comm_note(a) {
+    if (!a || !a.action) throw new Error('Paramètre requis : action.');
+    const r = await api.noteOp(a);
+    if (r.type === 'note') {
+      return `📝 Note ${r.note.id} ajoutée au journal partagé${r.note.tags.length ? ` [${r.note.tags.join(', ')}]` : ''}.\n🔔 Les pairs ont été notifiés.`;
+    }
+    if (!r.notes.length) return 'Journal vide. Note les décisions importantes avec comm_note action=add.';
+    return `📓 Journal partagé (${r.notes.length} note(s)) :\n\n` + r.notes
+      .map((n) => `[${n.id}] ${n.by} (${ago(n.ts)})${n.tags.length ? ` [${n.tags.join(', ')}]` : ''}\n${n.text}`)
+      .join('\n\n');
   },
 
   async comm_wait(a) {
     if (!a || !a.until) throw new Error('Paramètre requis : until.');
     const timeout = Math.min(Math.max(Number(a.timeout_seconds) || 60, 1), MAX_WAIT_S);
-    const deadline = Date.now() + timeout * 1000;
     const started = Date.now();
+    const deadline = started + timeout * 1000;
+    const elapsed = () => Math.round((Date.now() - started) / 1000);
+
+    if (a.until === 'message') {
+      const msgs = await api.inboxRead({ consume: true, waitSeconds: timeout });
+      if (msgs.length) return `⚡ Message reçu après ${elapsed()}s :\n\n${msgs.map(formatMessage).join('\n\n')}`;
+      return timeoutText(a.until, timeout);
+    }
 
     const peerName = a.peer ? sanitizeName(a.peer) : null;
-    let baseline = null;
-    if (a.until === 'peer_status') {
-      if (!peerName) throw new Error('peer_status nécessite le paramètre peer.');
-      baseline = JSON.stringify(loadSession(peerName) || {});
-    } else if (a.until === 'tasks') {
-      baseline = JSON.stringify(loadTasks());
-    }
+    if (a.until === 'peer_status' && !peerName) throw new Error('peer_status nécessite le paramètre peer.');
+    if (a.until === 'locks' && (!a.paths || !a.paths.length)) throw new Error('locks nécessite le paramètre paths.');
 
-    while (Date.now() < deadline) {
-      heartbeat();
-      if (a.until === 'message' && countNewMessages(NAME) > 0) {
-        const msgs = readInbox(NAME);
-        return `⚡ Message reçu après ${Math.round((Date.now() - started) / 1000)}s :\n\n${msgs.map(formatMessage).join('\n\n')}`;
-      }
+    let snap = await api.snapshot();
+    const stripped = (s) => JSON.stringify(stripVolatile(s));
+    let baselinePeer = a.until === 'peer_status'
+      ? stripped(snap.sessions.find((s) => s.name === peerName)) : null;
+    let baselineTasks = a.until === 'tasks' ? JSON.stringify(snap.tasks) : null;
+
+    const evaluate = (cur) => {
       if (a.until === 'peer_status') {
-        const cur = loadSession(peerName);
-        const curStr = JSON.stringify(cur || {});
-        // ignorer le simple heartbeat : comparer sans last_seen
-        const strip = (s) => s.replace(/"last_seen":"[^"]*"/, '');
-        if (cur && strip(curStr) !== strip(baseline)) {
-          return `⚡ L'état de ${peerName} a changé :\n${describeSession(cur, true)}`;
+        const s = cur.sessions.find((x) => x.name === peerName);
+        if (s && stripped(s) !== baselinePeer) {
+          return `⚡ L'état de ${peerName} a changé (après ${elapsed()}s) :\n${describeSession(s, true)}`;
         }
       }
-      if (a.until === 'tasks') {
-        const cur = JSON.stringify(loadTasks());
-        if (cur !== baseline) {
-          return `⚡ Le tableau de tâches a changé :\n\n${await HANDLERS.comm_task({ action: 'list' })}`;
-        }
+      if (a.until === 'tasks' && JSON.stringify(cur.tasks) !== baselineTasks) {
+        return `⚡ Le tableau de tâches a changé (après ${elapsed()}s) :\n\n${formatBoard(cur.tasks.tasks)}`;
       }
       if (a.until === 'locks') {
-        const paths = a.paths || [];
-        if (!paths.length) throw new Error('locks nécessite le paramètre paths.');
-        const locks = listLocks().filter((l) => l.owner !== NAME);
-        const blocked = paths.filter((p) => locks.some((l) => pathsOverlap(p, l.path)));
+        const others = cur.locks.filter((l) => l.owner !== NAME);
+        const blocked = a.paths.filter((p) => others.some((l) => pathsOverlap(p, l.path)));
         if (!blocked.length) {
-          return `⚡ Chemins libres : ${paths.join(', ')}. Verrouille-les maintenant avec comm_lock action=acquire.`;
+          return `⚡ Chemins libres : ${a.paths.join(', ')}. Verrouille-les maintenant avec comm_lock action=acquire.`;
         }
       }
-      await sleep(1000);
+      return null;
+    };
+
+    const immediate = evaluate(snap);
+    if (immediate) return immediate;
+
+    while (Date.now() < deadline) {
+      const remaining = Math.ceil((deadline - Date.now()) / 1000);
+      const next = await api.waitChange(snap.version, Math.min(remaining, 25));
+      if (next) {
+        snap = next;
+        const hit = evaluate(snap);
+        if (hit) return hit;
+      }
+      if (MODE === 'file') { try { await api.heartbeat(); } catch { /* ignore */ } }
     }
-    return `⏳ Timeout (${timeout}s) — l'événement "${a.until}" n'est pas survenu. ` +
-      `Tu peux relancer comm_wait, ou avancer sur autre chose et revérifier plus tard.`;
+    return timeoutText(a.until, timeout);
   },
 };
+
+function timeoutText(until, timeout) {
+  return `⏳ Timeout (${timeout}s) — l'événement "${until}" n'est pas survenu. ` +
+    `Tu peux relancer comm_wait, ou avancer sur autre chose et revérifier plus tard.`;
+}
 
 // ---------------------------------------------------------------------------
 // Mode CLI (inspection humaine) : node server.js status
 // ---------------------------------------------------------------------------
 
 if (ARGS._[0] === 'status') {
-  ensureDir(CHAN_DIR);
-  const sessions = listSessions();
-  console.log(`# claude-comm — canal "${CHANNEL}" (hub: ${CHAN_DIR})\n`);
-  console.log('## Sessions');
-  console.log(sessions.length ? sessions.map((s) => describeSession(s, true)).join('\n\n') : '(aucune)');
-  const db = loadTasks();
-  console.log('\n## Tâches');
-  console.log(db.tasks.length ? db.tasks.map(formatTask).join('\n') : '(aucune)');
-  const locks = listLocks();
-  console.log('\n## Verrous');
-  console.log(locks.length ? locks.map((l) => `- ${l.path} → ${l.owner} (${ago(l.ts)})`).join('\n') : '(aucun)');
-  for (const s of sessions) {
-    const n = countNewMessages(s.name);
-    if (n) console.log(`\n📬 ${s.name} : ${n} message(s) non lu(s)`);
-  }
-  process.exit(0);
+  (async () => {
+    if (MODE === 'file') ensureDir(CHAN_DIR);
+    const snap = await api.snapshot();
+    const notes = MODE === 'file' ? readJSON(NOTES_FILE, []) : null;
+    console.log(`# claude-comm — canal "${CHANNEL}" (${MODE === 'relay' ? `relais ${RELAY_URL}` : `hub ${CHAN_DIR}`})\n`);
+    console.log('## Sessions');
+    console.log(snap.sessions.length ? snap.sessions.map((s) => describeSession(s, true)).join('\n\n') : '(aucune)');
+    console.log('\n## Tâches');
+    console.log(snap.tasks.tasks.length ? snap.tasks.tasks.map(formatTask).join('\n') : '(aucune)');
+    console.log('\n## Verrous');
+    console.log(snap.locks.length ? snap.locks.map((l) => `- ${l.path} → ${l.owner} (${ago(l.ts)})`).join('\n') : '(aucun)');
+    if (notes && notes.length) console.log(`\n## Journal : ${notes.length} note(s)`);
+    for (const [name, n] of Object.entries(snap.inbox_counts || {})) {
+      if (n) console.log(`\n📬 ${name} : ${n} message(s) non lu(s)`);
+    }
+  })().then(() => process.exit(0), (e) => { console.error(`❌ ${e.message}`); process.exit(1); });
+} else {
+  startMcp();
 }
 
 // ---------------------------------------------------------------------------
 // Boucle MCP (JSON-RPC sur stdio, messages délimités par des sauts de ligne)
 // ---------------------------------------------------------------------------
 
-ensureDir(SESSIONS_DIR);
-ensureDir(inboxNewDir(NAME));
-ensureDir(LOCKS_DIR);
+function startMcp() {
+  if (MODE === 'file') {
+    ensureDir(SESSIONS_DIR);
+    ensureDir(inboxNewDir(NAME));
+  } else if (!TOKEN) {
+    console.error('⚠️ CLAUDE_COMM_RELAY défini sans CLAUDE_COMM_TOKEN : le relais refusera les requêtes.');
+  }
 
-function send(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
+  const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
+  const respond = (id, result) => send({ jsonrpc: '2.0', id, result });
+  const respondError = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, message } });
 
-function respond(id, result) { send({ jsonrpc: '2.0', id, result }); }
-
-function respondError(id, code, message) {
-  send({ jsonrpc: '2.0', id, error: { code, message } });
-}
-
-async function handleRequest(req) {
-  const { id, method, params } = req;
-  try {
-    if (method === 'initialize') {
-      heartbeat();
-      respond(id, {
-        protocolVersion: (params && params.protocolVersion) || '2024-11-05',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'claude-comm', version: '1.0.0' },
-        instructions:
-          `Tu es connecté au canal de coordination "${CHANNEL}" sous le nom "${NAME}". ` +
-          `D'autres sessions Claude peuvent travailler en parallèle avec toi. ` +
-          `Commence par comm_join pour t'annoncer, publie ton état avec comm_status_set, ` +
-          `et relève ta boîte avec comm_inbox régulièrement (au minimum entre deux tâches).`,
-      });
-      return;
-    }
-    if (!id && typeof method === 'string' && method.startsWith('notifications/')) return;
-    if (method === 'ping') { respond(id, {}); return; }
-    if (method === 'tools/list') { respond(id, { tools: TOOLS }); return; }
-    if (method === 'tools/call') {
-      const name = params && params.name;
-      const args = (params && params.arguments) || {};
-      const handler = HANDLERS[name];
-      if (!handler) { respondError(id, -32602, `Outil inconnu : ${name}`); return; }
-      heartbeat();
-      try {
-        let text = await handler(args);
-        if (name !== 'comm_inbox' && name !== 'comm_wait') text += inboxFooter();
-        respond(id, { content: [{ type: 'text', text }] });
-      } catch (e) {
-        respond(id, { content: [{ type: 'text', text: `❌ ${e.message}` }], isError: true });
+  async function handleRequest(req) {
+    const { id, method, params } = req;
+    try {
+      if (method === 'initialize') {
+        try { await api.heartbeat(); } catch { /* relais down : les outils le diront */ }
+        api.startBackground();
+        respond(id, {
+          protocolVersion: (params && params.protocolVersion) || '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'claude-comm', version: '2.0.0' },
+          instructions:
+            `Tu es connecté au canal de coordination "${CHANNEL}" sous le nom "${NAME}"` +
+            `${MODE === 'relay' ? ` via le relais ${RELAY_URL}` : ''}. ` +
+            `D'autres sessions Claude peuvent travailler en parallèle avec toi (y compris sur d'autres machines). ` +
+            `Commence par comm_join pour t'annoncer, publie ton état avec comm_status_set, ` +
+            `et relève ta boîte avec comm_inbox régulièrement (au minimum entre deux tâches).`,
+        });
+        return;
       }
-      return;
+      if (!id && typeof method === 'string' && method.startsWith('notifications/')) return;
+      if (method === 'ping') { respond(id, {}); return; }
+      if (method === 'tools/list') { respond(id, { tools: TOOLS }); return; }
+      if (method === 'tools/call') {
+        const name = params && params.name;
+        const args = (params && params.arguments) || {};
+        const handler = HANDLERS[name];
+        if (!handler) { respondError(id, -32602, `Outil inconnu : ${name}`); return; }
+        try {
+          if (name !== 'comm_join' && name !== 'comm_status_set') {
+            try { await api.heartbeat(); } catch { /* le handler remontera l'erreur */ }
+          }
+          let text = await handler(args);
+          if (name !== 'comm_inbox' && name !== 'comm_wait') text += await inboxFooter();
+          respond(id, { content: [{ type: 'text', text }] });
+        } catch (e) {
+          respond(id, { content: [{ type: 'text', text: `❌ ${e.message}` }], isError: true });
+        }
+        return;
+      }
+      if (id !== undefined && id !== null) respondError(id, -32601, `Méthode inconnue : ${method}`);
+    } catch (e) {
+      if (id !== undefined && id !== null) respondError(id, -32603, e.message);
     }
-    if (id !== undefined && id !== null) respondError(id, -32601, `Méthode inconnue : ${method}`);
-  } catch (e) {
-    if (id !== undefined && id !== null) respondError(id, -32603, e.message);
   }
-}
 
-let buffer = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  buffer += chunk;
-  let idx;
-  while ((idx = buffer.indexOf('\n')) !== -1) {
-    const line = buffer.slice(0, idx).trim();
-    buffer = buffer.slice(idx + 1);
-    if (!line) continue;
-    let msg;
-    try { msg = JSON.parse(line); } catch { continue; }
-    handleRequest(msg);
-  }
-});
-
-function markLeft() {
-  try {
-    const s = loadSession(NAME);
-    if (s && s.pid === process.pid) {
-      writeJSONAtomic(sessionFile(NAME), { ...s, state: 'offline', last_seen: nowISO() });
+  let buffer = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buffer += chunk;
+    let idx;
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      handleRequest(msg);
     }
-  } catch { /* ignore */ }
-}
+  });
 
-process.stdin.on('end', () => { markLeft(); process.exit(0); });
-process.on('SIGTERM', () => { markLeft(); process.exit(0); });
-process.on('SIGINT', () => { markLeft(); process.exit(0); });
+  async function shutdown() {
+    try {
+      if (MODE === 'file') {
+        const s = readJSON(sessionFile(NAME), null);
+        if (s && s.pid === process.pid) {
+          writeJSONAtomic(sessionFile(NAME), { ...s, state: 'offline', last_seen: nowISO() });
+        }
+      } else {
+        await Promise.race([api.heartbeat({ state: 'offline' }), sleep(2000)]);
+      }
+    } catch { /* ignore */ }
+    process.exit(0);
+  }
+
+  process.stdin.on('end', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}

@@ -40,14 +40,20 @@ Règles de coordination :
    autre chose ou attends avec comm_wait until=locks.
 
 6. VISIBILITÉ — Pour savoir où en est l'autre sans le déranger :
-   comm_status_get (état publié) et comm_diff (son diff git en direct).
+   comm_status_get (état publié), comm_diff (son diff git en direct) et
+   comm_file (sa version d'un fichier, en lecture seule).
    Pour un compte-rendu actif : comm_send kind=status_request, puis
    comm_inbox wait_seconds=60.
 
 7. SYNCHRONISATION — Si tu dépends du travail de l'autre, ne tourne pas
    en boucle : utilise comm_wait (until=message / peer_status / tasks).
 
-8. FIN — Quand le tableau est vide et ton travail poussé :
+8. DÉCISIONS — Toute décision qui engage les deux (interface commune,
+   convention de nommage, choix de lib, piège découvert) va dans le
+   journal partagé : comm_note action=add tags=["decision"]. Consulte
+   comm_note action=list avant de trancher un point d'architecture.
+
+9. FIN — Quand le tableau est vide et ton travail poussé :
    comm_status_set state=done, et envoie un résumé final à l'autre.
 ```
 
@@ -72,6 +78,15 @@ comm_diff peer=bob mode=full path=src ← diff complet d'un dossier
 ```
 
 Ou en lui demandant un résumé commenté : `comm_send to=bob kind=diff_request body="Résume tes changements sur src/auth"`.
+
+En mode relais (multi-machines), `comm_diff` et `comm_file` sont répondus
+automatiquement par l'instance du pair — son modèle n'est pas interrompu.
+
+### Voir la version d'un fichier du pair
+
+```
+comm_file peer=bob path=src/types/api.ts   ← avant de coder contre son interface
+```
 
 ### Paralléliser un gros chantier
 

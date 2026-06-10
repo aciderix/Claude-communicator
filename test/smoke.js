@@ -67,7 +67,7 @@ function ok(cond, label) {
     ok(initA.result.serverInfo.name === 'claude-comm', 'initialize alice');
     await bob.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });
     const toolsList = await alice.rpc('tools/list', {});
-    ok(toolsList.result.tools.length === 10, 'tools/list expose 10 outils');
+    ok(toolsList.result.tools.length === 12, 'tools/list expose 12 outils');
 
     console.log('join & peers');
     await alice.call('comm_join', { role: 'backend', task: 'API' });
@@ -135,9 +135,18 @@ function ok(cond, label) {
     const wt = await waitTasks;
     ok(wt.text.includes('tableau de tâches a changé'), 'comm_wait until=tasks se déclenche');
 
-    console.log('diff du pair');
+    console.log('diff et fichier du pair');
     const diff = await bob.call('comm_diff', { peer: 'alice', mode: 'stat' });
     ok(diff.text.includes('git status'), 'comm_diff lit le worktree du pair');
+    const file = await bob.call('comm_file', { peer: 'alice', path: 'package.json' });
+    ok(file.text.includes('claude-comm'), 'comm_file lit un fichier du pair');
+    const escape = await bob.call('comm_file', { peer: 'alice', path: '../../etc/passwd' });
+    ok(escape.isError && escape.text.includes('refusé'), 'comm_file refuse les chemins hors du worktree');
+
+    console.log('journal partagé');
+    await alice.call('comm_note', { action: 'add', text: 'API REST : préfixe /v2 partout', tags: ['decision', 'api'] });
+    const notes = await bob.call('comm_note', { action: 'list', tag: 'api' });
+    ok(notes.text.includes('/v2'), 'comm_note list retrouve la note par tag');
 
     console.log('notification de non-lus en pied de réponse');
     await alice.call('comm_send', { to: 'bob', body: 'pense à relire' });
