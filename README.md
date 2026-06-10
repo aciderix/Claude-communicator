@@ -34,10 +34,15 @@ MCP **sans aucune dépendance** (Node ≥ 18).
 | Demander activement un compte-rendu | `comm_send kind=status_request` |
 | **Voir le diff git de l'autre en direct, même à distance** | `comm_diff peer=bob mode=full` |
 | **Lire un fichier du worktree de l'autre** (lecture seule) | `comm_file peer=bob path=src/api.ts` |
-| Se répartir les tâches (claim atomique) | `comm_task action=next` |
+| **Feuille de route partagée que tous complètent** (cap + jalons) | `comm_plan` |
+| Se répartir les tâches (claim atomique, rattachées aux jalons) | `comm_task action=next` |
+| Assigner une tâche à un pair (le lead bosse aussi) | `comm_task action=assign` |
+| **Revue croisée avant merge** (diff joint automatiquement) | `comm_review` |
+| **Vue d'ensemble agrégée** (plan, sessions, tâches, revues...) | `comm_overview` |
 | Éviter d'éditer les mêmes fichiers | `comm_lock action=acquire` |
 | **Journal partagé de décisions et conventions** | `comm_note action=add` |
-| Attendre un événement (message, état, tâches, verrous) | `comm_wait` |
+| Attendre un événement (message, état, tâches, plan, revues, verrous) | `comm_wait` |
+| **L'humain participe au canal** (superviser, ordonner, répondre) | CLI `status` / `send` / `inbox` |
 
 En mode relais, les demandes de diff et de fichier sont **auto-répondues par
 l'instance du pair** (boucle de service en arrière-plan) : son modèle n'est
@@ -173,14 +178,37 @@ messages entrants sont injectés automatiquement dans son contexte. Dans
 Le hook fonctionne dans les deux modes (il utilise les mêmes variables
 d'environnement) et fait aussi office de heartbeat.
 
-## Supervision humaine
+## L'humain dans la boucle (CLI)
+
+Le propriétaire du projet peut superviser **et participer** au canal sans
+session Claude (fonctionne dans les deux modes ; via relais, ajoutez
+`CLAUDE_COMM_RELAY` et `CLAUDE_COMM_TOKEN`) :
 
 ```bash
-node server.js status                 # mode fichier
-CLAUDE_COMM_RELAY=... CLAUDE_COMM_TOKEN=... node server.js status   # via relais
+node server.js status            # feuille de route, sessions, tâches, revues, verrous
+
+CLAUDE_COMM_NAME=patron node server.js send "*" "Priorité au bugfix #42"
+CLAUDE_COMM_NAME=patron node server.js send alice "Où en es-tu ?"
+CLAUDE_COMM_NAME=patron node server.js inbox     # lire les réponses
 ```
 
-Affiche sessions (🟢/⚪), tâches, verrous et messages en attente du canal.
+Les sessions Claude voient l'humain comme un pair et peuvent lui répondre
+avec `comm_send to=patron`.
+
+## Orchestration : feuille de route et lead qui bosse
+
+La **feuille de route partagée** (`comm_plan`) porte le cap de la mission
+et des jalons (M1, M2...) que *toutes* les sessions peuvent compléter et
+faire évoluer en cours de route. Les tâches s'y rattachent
+(`comm_task add milestone=M2`) et la progression par jalon est agrégée
+automatiquement, visible d'un coup avec `comm_overview`.
+
+Un « lead » n'est qu'un rôle, pas un statut : il peut assigner des tâches
+(`comm_task action=assign id=T3 to=bob` — le `next` de bob prendra ses
+tâches assignées en priorité) **tout en prenant lui-même des tâches en
+parallèle**. Avant de merger, chacun demande une relecture croisée avec
+`comm_review` (le diff stat est joint automatiquement à la demande).
+Les recettes complètes sont dans [`PROTOCOL.md`](PROTOCOL.md).
 
 ## Les outils en détail
 
@@ -202,14 +230,25 @@ Affiche sessions (🟢/⚪), tâches, verrous et messages en attente du canal.
   Multi-machines via le relais (auto-répondu par son instance).
 - **`comm_file`** — lit un fichier ou liste un dossier du worktree d'un pair
   (lecture seule, confiné, 100 Ko max).
-- **`comm_task`** — tableau partagé : `add`, `list`, `next` (claim atomique),
-  `claim`, `update`, `done`, `release`. Chaque changement notifie les pairs.
+- **`comm_plan`** — feuille de route partagée : cap (`goal`) + jalons
+  (`add`/`update`/`done`/`list`), complétable par toutes les sessions,
+  progression par jalon calculée depuis les tâches rattachées.
+- **`comm_task`** — tableau partagé : `add` (option `milestone`), `list`,
+  `next` (claim atomique, tâches assignées en priorité), `claim`, `assign`
+  (confier à un pair), `update`, `done`, `release`. Chaque changement
+  notifie les pairs.
+- **`comm_review`** — revue croisée : `request` (diff stat joint
+  automatiquement), `approve`/`changes` (réservés au relecteur désigné),
+  `close` (réservé au demandeur), `list`.
+- **`comm_overview`** — tout l'état du canal en un appel : feuille de
+  route, sessions, tâches ouvertes, revues en attente, verrous, notes.
 - **`comm_lock`** — verrous coopératifs sur fichiers/dossiers (chemins
   parent/enfant en conflit). `acquire` / `release` / `list`.
 - **`comm_note`** — journal partagé de décisions/conventions, taggable,
   persistant pour toutes les sessions du canal.
 - **`comm_wait`** — attente bloquante : `message`, `peer_status`, `tasks`,
-  `locks` (long-poll efficace en mode relais, timeout max 300 s).
+  `plan`, `reviews`, `locks` (long-poll efficace en mode relais, timeout
+  max 300 s).
 
 ## Limites connues
 
@@ -222,5 +261,5 @@ Affiche sessions (🟢/⚪), tâches, verrous et messages en attente du canal.
 ## Tests
 
 ```bash
-npm test   # 28 assertions en mode fichier + 18 en mode relais
+npm test   # 41 assertions en mode fichier + 22 en mode relais
 ```

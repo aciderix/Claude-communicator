@@ -67,7 +67,7 @@ function ok(cond, label) {
     ok(initA.result.serverInfo.name === 'claude-comm', 'initialize alice');
     await bob.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });
     const toolsList = await alice.rpc('tools/list', {});
-    ok(toolsList.result.tools.length === 12, 'tools/list expose 12 outils');
+    ok(toolsList.result.tools.length === 15, 'tools/list expose 15 outils');
 
     console.log('join & peers');
     await alice.call('comm_join', { role: 'backend', task: 'API' });
@@ -147,6 +147,53 @@ function ok(cond, label) {
     await alice.call('comm_note', { action: 'add', text: 'API REST : préfixe /v2 partout', tags: ['decision', 'api'] });
     const notes = await bob.call('comm_note', { action: 'list', tag: 'api' });
     ok(notes.text.includes('/v2'), 'comm_note list retrouve la note par tag');
+
+    console.log('feuille de route partagée');
+    await alice.call('comm_plan', { action: 'goal', text: 'Migrer toute l\'app vers TypeScript' });
+    await alice.call('comm_plan', { action: 'add', title: 'Backend migré' });
+    await bob.call('comm_plan', { action: 'add', title: 'Frontend migré', detail: 'composants + hooks' });
+    const planList = await bob.call('comm_plan', { action: 'list' });
+    ok(planList.text.includes('M1') && planList.text.includes('M2') && planList.text.includes('TypeScript'),
+      'les deux sessions complètent la même feuille de route');
+    await alice.call('comm_task', { action: 'add', title: 'Migrer module auth', milestone: 'M1' });
+    const planRoll = await alice.call('comm_plan', { action: 'list' });
+    ok(planRoll.text.includes('0/1 tâche'), 'rollup des tâches par jalon');
+    await bob.call('comm_plan', { action: 'update', id: 'M2', status: 'active', note: 'je commence' });
+    const planUpd = await alice.call('comm_plan', { action: 'list' });
+    ok(planUpd.text.includes('🔵 M2'), 'jalon passé en active par bob');
+
+    console.log('assignation (le lead bosse aussi en parallèle)');
+    const assigned = await alice.call('comm_task', { action: 'assign', id: 'T3', to: 'bob' });
+    ok(assigned.text.includes('assignée à bob'), 'alice assigne T3 à bob');
+    const nextA2 = await alice.call('comm_task', { action: 'next' });
+    ok(!nextA2.text.includes('T3'), "le next d'alice ne vole pas la tâche assignée à bob");
+    const nextB2 = await bob.call('comm_task', { action: 'next' });
+    ok(nextB2.text.includes('T3'), 'le next de bob prend sa tâche assignée en priorité');
+
+    console.log('revue croisée');
+    const reqR = await alice.call('comm_review', { action: 'request', to: 'bob', title: 'Migration auth', note: 'regarde surtout les types' });
+    ok(reqR.text.includes('R1') && reqR.text.includes('pending'), 'demande de revue créée avec diff joint');
+    const badApprove = await alice.call('comm_review', { action: 'approve', id: 'R1' });
+    ok(badApprove.isError && badApprove.text.includes('Seul bob'), 'seul le relecteur désigné peut approuver');
+    const appr = await bob.call('comm_review', { action: 'approve', id: 'R1', note: 'types OK' });
+    ok(appr.text.includes('approved'), 'bob approuve R1');
+    const closeR = await alice.call('comm_review', { action: 'close', id: 'R1' });
+    ok(closeR.text.includes('closed'), 'alice clôt la revue après merge');
+
+    console.log("vue d'ensemble");
+    const ov = await alice.call('comm_overview', {});
+    ok(ov.text.includes('Feuille de route') && ov.text.includes('Sessions') && ov.text.includes('TypeScript'),
+      'comm_overview agrège plan, sessions, tâches et notes');
+
+    console.log('participation humaine via CLI');
+    const { execFileSync: run } = require('child_process');
+    const envH = { ...process.env, CLAUDE_COMM_NAME: 'patron', CLAUDE_COMM_HUB: HUB, CLAUDE_COMM_CHANNEL: 'test' };
+    run(process.execPath, [SERVER, 'send', 'alice', 'priorité', 'au', 'bugfix'], { env: envH, encoding: 'utf8' });
+    const inboxH = await alice.call('comm_inbox', {});
+    ok(inboxH.text.includes('priorité au bugfix') && inboxH.text.includes('patron'), 'message du CLI humain reçu par alice');
+    await alice.call('comm_send', { to: 'patron', body: 'bien reçu chef' });
+    const outH = run(process.execPath, [SERVER, 'inbox'], { env: envH, encoding: 'utf8' });
+    ok(outH.includes('bien reçu chef'), 'le CLI inbox lit les réponses des sessions');
 
     console.log('notification de non-lus en pied de réponse');
     await alice.call('comm_send', { to: 'bob', body: 'pense à relire' });

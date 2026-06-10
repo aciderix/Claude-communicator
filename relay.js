@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const {
   sanitizeName, nowISO, newId, emptyTasks,
   applyTaskAction, applyLockAction, applyNoteAction,
+  emptyPlan, applyPlanAction, emptyReviews, applyReviewAction,
 } = require('./lib/shared');
 
 // ---------------------------------------------------------------------------
@@ -95,6 +96,8 @@ function newChannel(name) {
     tasks: emptyTasks(),
     locks: [],
     notes: [],
+    plan: emptyPlan(),
+    reviews: emptyReviews(),
     version: 1,
     waiters: [],         // long-polls en attente (état / inbox)
     servicePollers: new Map(),  // name -> {res, timer}
@@ -125,7 +128,8 @@ function persist(ch) {
       const tmp = `${f}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify({
         sessions: ch.sessions, inboxes: ch.inboxes,
-        tasks: ch.tasks, locks: ch.locks, notes: ch.notes, version: ch.version,
+        tasks: ch.tasks, locks: ch.locks, notes: ch.notes,
+        plan: ch.plan, reviews: ch.reviews, version: ch.version,
       }));
       fs.renameSync(tmp, f);
     } catch (e) { console.error(`persistance ${ch.name}:`, e.message); }
@@ -144,7 +148,8 @@ function loadPersisted() {
       Object.assign(ch, {
         sessions: d.sessions || {}, inboxes: d.inboxes || {},
         tasks: d.tasks || emptyTasks(), locks: d.locks || [],
-        notes: d.notes || [], version: (d.version || 1) + 1,
+        notes: d.notes || [], plan: d.plan || emptyPlan(),
+        reviews: d.reviews || emptyReviews(), version: (d.version || 1) + 1,
       });
       channels.set(name, ch);
     } catch (e) { console.error(`chargement ${f}:`, e.message); }
@@ -269,6 +274,8 @@ function statePayload(ch) {
     sessions: sessionsList(ch),
     tasks: ch.tasks,
     locks: ch.locks,
+    plan: ch.plan,
+    reviews: ch.reviews,
     notes_count: ch.notes.length,
     inbox_counts: Object.fromEntries(Object.entries(ch.inboxes).map(([k, v]) => [k, v.length])),
   };
@@ -389,6 +396,20 @@ async function handle(req, res) {
   if (req.method === 'POST' && rest[0] === 'notes') {
     const actor = sanitizeName(body.actor);
     const op = applyNoteAction(ch.notes, actor, body);
+    notifyFromOp(ch, actor, op);
+    if (op.changed) bump(ch);
+    return json(res, 200, { result: op.result });
+  }
+  if (req.method === 'POST' && rest[0] === 'plan') {
+    const actor = sanitizeName(body.actor);
+    const op = applyPlanAction(ch.plan, actor, body);
+    notifyFromOp(ch, actor, op);
+    if (op.changed) bump(ch);
+    return json(res, 200, { result: op.result });
+  }
+  if (req.method === 'POST' && rest[0] === 'reviews') {
+    const actor = sanitizeName(body.actor);
+    const op = applyReviewAction(ch.reviews, actor, body);
     notifyFromOp(ch, actor, op);
     if (op.changed) bump(ch);
     return json(res, 200, { result: op.result });

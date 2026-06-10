@@ -1,7 +1,7 @@
 {
   "name": "claude-comm",
-  "version": "2.0.0",
-  "description": "Coordination en direct entre sessions Claude Code, sur une machine ou en multi-machines sécurisé : messagerie, état live, diff/fichiers du pair, tableau de tâches partagé, verrous, journal de décisions.",
+  "version": "3.0.0",
+  "description": "Coordination en direct entre sessions Claude Code, sur une machine ou en multi-machines sécurisé : messagerie, état live, diff/fichiers du pair, feuille de route partagée, tâches assignables, revues croisées, verrous, journal de décisions, participation humaine via CLI.",
   "bin": {
     "claude-comm": "./server.js",
     "claude-comm-relay": "./relay.js"

@@ -143,6 +143,18 @@ function ok(cond, label) {
     const notes = await bob.call('comm_note', { action: 'list' });
     ok(notes.text.includes('Convention'), 'journal partagé via le relais');
 
+    console.log('feuille de route, revue et overview via le relais');
+    await alice.call('comm_plan', { action: 'goal', text: 'API v2 en production' });
+    await bob.call('comm_plan', { action: 'add', title: 'Spec validée' });
+    const pl = await alice.call('comm_plan', { action: 'list' });
+    ok(pl.text.includes('API v2') && pl.text.includes('M1'), 'feuille de route complétée à travers le relais');
+    const rr = await alice.call('comm_review', { action: 'request', to: 'bob', title: 'revue endpoints' });
+    ok(rr.text.includes('R1'), 'revue demandée via le relais');
+    const appr = await bob.call('comm_review', { action: 'approve', id: 'R1' });
+    ok(appr.text.includes('approved'), 'revue approuvée via le relais');
+    const ov = await bob.call('comm_overview', {});
+    ok(ov.text.includes('API v2') && ov.text.includes('Sessions'), 'overview agrégé via le relais');
+
     console.log('client avec mauvais jeton');
     mallory = new Client('mallory', 'jeton-invalide');
     await mallory.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });

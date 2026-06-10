@@ -29,6 +29,7 @@ const { execFileSync } = require('child_process');
 const {
   sanitizeName, nowISO, newId, normalizePath, pathsOverlap,
   emptyTasks, applyTaskAction, applyLockAction, applyNoteAction,
+  emptyPlan, applyPlanAction, emptyReviews, applyReviewAction,
 } = require('./lib/shared');
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,7 @@ const HUB = path.resolve(
   ARGS.hub || process.env.CLAUDE_COMM_HUB || path.join(os.homedir(), '.claude-comm')
 );
 const CHANNEL = sanitizeName(ARGS.channel || process.env.CLAUDE_COMM_CHANNEL || 'default');
+const NAME_PROVIDED = !!(ARGS.name || process.env.CLAUDE_COMM_NAME);
 const NAME = sanitizeName(
   ARGS.name || process.env.CLAUDE_COMM_NAME || `claude-${crypto.randomBytes(2).toString('hex')}`
 );
@@ -70,6 +72,8 @@ const INBOX_DIR = path.join(CHAN_DIR, 'inbox');
 const TASKS_FILE = path.join(CHAN_DIR, 'tasks.json');
 const LOCKS_FILE = path.join(CHAN_DIR, 'locks.json');
 const NOTES_FILE = path.join(CHAN_DIR, 'notes.json');
+const PLAN_FILE = path.join(CHAN_DIR, 'plan.json');
+const REVIEWS_FILE = path.join(CHAN_DIR, 'reviews.json');
 const STATE_LOCK = path.join(CHAN_DIR, 'state.lock');
 
 const OFFLINE_AFTER_MS = 15 * 60 * 1000;
@@ -284,10 +288,12 @@ function fileSnapshot() {
   const sessions = fileListSessions();
   const tasks = readJSON(TASKS_FILE, emptyTasks());
   const locks = readJSON(LOCKS_FILE, []);
-  const stable = JSON.stringify({ s: sessions.map(stripVolatile), t: tasks, l: locks });
+  const plan = readJSON(PLAN_FILE, emptyPlan());
+  const reviews = readJSON(REVIEWS_FILE, emptyReviews());
+  const stable = JSON.stringify({ s: sessions.map(stripVolatile), t: tasks, l: locks, p: plan, r: reviews });
   return {
     version: crypto.createHash('sha1').update(stable).digest('hex'),
-    sessions, tasks, locks,
+    sessions, tasks, locks, plan, reviews,
     inbox_counts: Object.fromEntries(sessions.map((s) => [s.name, listDir(inboxNewDir(s.name)).length])),
   };
 }
@@ -370,6 +376,26 @@ const fileApi = {
       const notes = readJSON(NOTES_FILE, []);
       const op = applyNoteAction(notes, NAME, a);
       if (op.changed) writeJSONAtomic(NOTES_FILE, notes);
+      fileNotify(op);
+      return op.result;
+    });
+  },
+
+  async planOp(a) {
+    return withStateLock(async () => {
+      const plan = readJSON(PLAN_FILE, emptyPlan());
+      const op = applyPlanAction(plan, NAME, a);
+      if (op.changed) writeJSONAtomic(PLAN_FILE, plan);
+      fileNotify(op);
+      return op.result;
+    });
+  },
+
+  async reviewOp(a) {
+    return withStateLock(async () => {
+      const reviews = readJSON(REVIEWS_FILE, emptyReviews());
+      const op = applyReviewAction(reviews, NAME, a);
+      if (op.changed) writeJSONAtomic(REVIEWS_FILE, reviews);
       fileNotify(op);
       return op.result;
     });
@@ -473,6 +499,8 @@ const relayApi = {
   async taskOp(a) { return (await rfetch('POST', '/tasks', { ...a, actor: NAME })).result; },
   async lockOp(a) { return (await rfetch('POST', '/locks', { ...a, actor: NAME })).result; },
   async noteOp(a) { return (await rfetch('POST', '/notes', { ...a, actor: NAME })).result; },
+  async planOp(a) { return (await rfetch('POST', '/plan', { ...a, actor: NAME })).result; },
+  async reviewOp(a) { return (await rfetch('POST', '/reviews', { ...a, actor: NAME })).result; },
 
   async snapshot() { return rfetch('GET', '/state'); },
 
@@ -564,7 +592,7 @@ function formatMessage(m) {
 
 function formatTask(t) {
   const icon = { todo: '⬜', in_progress: '🔵', done: '✅', blocked: '🟥' }[t.status] || '⬜';
-  let line = `${icon} ${t.id} [${t.status}] ${t.title}`;
+  let line = `${icon} ${t.id}${t.milestone ? ` (${t.milestone})` : ''} [${t.status}] ${t.title}`;
   if (t.owner) line += ` — pris par ${t.owner}`;
   if (t.detail) line += `\n     ${t.detail}`;
   if (t.notes && t.notes.length) {
@@ -581,6 +609,45 @@ function formatBoard(tasks) {
     (open.length ? open.map(formatTask).join('\n') : '(aucune tâche ouverte)');
   if (done.length) out += `\n\nTerminées :\n${done.map(formatTask).join('\n')}`;
   return out;
+}
+
+function formatMilestone(m, tasks = []) {
+  const icon = { todo: '⬜', active: '🔵', done: '✅', dropped: '🚫' }[m.status] || '⬜';
+  const linked = tasks.filter((t) => t.milestone === m.id);
+  const doneCount = linked.filter((t) => t.status === 'done').length;
+  let line = `${icon} ${m.id} [${m.status}] ${m.title}`;
+  if (linked.length) line += ` — ${doneCount}/${linked.length} tâche(s) faite(s)`;
+  if (m.detail) line += `\n     ${m.detail}`;
+  if (m.notes && m.notes.length) {
+    line += '\n' + m.notes.slice(-2).map((n) => `     · ${n}`).join('\n');
+  }
+  return line;
+}
+
+function formatPlan(plan, tasks = []) {
+  const lines = [plan.goal
+    ? `🎯 Cap : ${plan.goal}`
+    : '🎯 Cap : (non défini — fixe-le avec comm_plan action=goal)'];
+  if (!plan.milestones.length) {
+    lines.push('\nAucun jalon. Construis la feuille de route avec comm_plan action=add.');
+    return lines.join('\n');
+  }
+  lines.push('');
+  for (const m of plan.milestones) lines.push(formatMilestone(m, tasks));
+  const doneM = plan.milestones.filter((m) => m.status === 'done').length;
+  const active = plan.milestones.filter((m) => m.status !== 'done' && m.status !== 'dropped').length;
+  lines.push(`\nProgression : ${doneM}/${plan.milestones.length} jalon(s) terminé(s), ${active} en cours ou à faire.`);
+  return lines.join('\n');
+}
+
+function formatReview(r) {
+  const icon = { pending: '🟡', approved: '✅', changes_requested: '🟠', closed: '⚪' }[r.status] || '🟡';
+  let line = `${icon} ${r.id} [${r.status}] ${r.title || '(sans titre)'} — ${r.from} → relu par ${r.to} (${ago(r.updated_at)})`;
+  if (r.note) line += `\n     ${r.note}`;
+  if (r.events && r.events.length) {
+    line += '\n' + r.events.slice(-3).map((e) => `     · ${e}`).join('\n');
+  }
+  return line;
 }
 
 async function inboxFooter() {
@@ -715,19 +782,61 @@ const TOOLS = [
   {
     name: 'comm_task',
     description:
-      "Tableau de tâches partagé pour paralléliser sans conflit. Actions : add (créer), list, next (prendre atomiquement la prochaine tâche libre), claim (prendre une tâche précise), update (statut/note), done (terminer), release (rendre). Les pairs sont notifiés des changements.",
+      "Tableau de tâches partagé pour paralléliser sans conflit. Actions : add (créer, rattachable à un jalon de la feuille de route via milestone), list, next (prendre atomiquement la prochaine tâche : d'abord celles qui te sont assignées, puis les libres), claim (prendre une tâche précise), assign (confier une tâche à un pair — tout en continuant toi-même à travailler en parallèle), update (statut/note), done (terminer), release (rendre). Les pairs sont notifiés des changements.",
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['add', 'list', 'next', 'claim', 'update', 'done', 'release'], description: 'Action à effectuer' },
-        id: { type: 'string', description: "Id de la tâche (ex: 'T3') pour claim/update/done/release" },
+        action: { type: 'string', enum: ['add', 'list', 'next', 'claim', 'assign', 'update', 'done', 'release'], description: 'Action à effectuer' },
+        id: { type: 'string', description: "Id de la tâche (ex: 'T3') pour claim/assign/update/done/release" },
         title: { type: 'string', description: 'Titre (pour add)' },
         detail: { type: 'string', description: 'Description (pour add)' },
+        milestone: { type: 'string', description: "Jalon de la feuille de route auquel rattacher la tâche (ex: 'M2', pour add)" },
+        to: { type: 'string', description: 'Pair à qui confier la tâche (pour assign)' },
         status: { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done'], description: 'Nouveau statut (pour update)' },
         note: { type: 'string', description: 'Note de progression ou résultat' },
       },
       required: ['action'],
     },
+  },
+  {
+    name: 'comm_plan',
+    description:
+      "Feuille de route partagée du canal : un cap (goal) et des jalons (M1, M2...) que TOUTES les sessions peuvent compléter et faire évoluer. Les tâches s'y rattachent (comm_task add milestone=M2) et la progression est agrégée automatiquement. Actions : goal (fixer/mettre à jour le cap), add (jalon), update (titre/détail/statut/note), done, list.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['goal', 'add', 'update', 'done', 'list'], description: 'Action à effectuer' },
+        text: { type: 'string', description: 'Le cap de la mission (pour goal)' },
+        id: { type: 'string', description: "Id du jalon (ex: 'M2') pour update/done" },
+        title: { type: 'string', description: 'Titre du jalon (pour add/update)' },
+        detail: { type: 'string', description: 'Description du jalon' },
+        status: { type: 'string', enum: ['todo', 'active', 'done', 'dropped'], description: 'Statut (pour update)' },
+        note: { type: 'string', description: 'Note de progression' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'comm_review',
+    description:
+      "Revue croisée avant merge : request demande à un pair de relire ton travail (ton diff stat est joint automatiquement ; le relecteur peut voir le détail avec comm_diff). Le relecteur répond avec approve ou changes (avec note). Le demandeur clôt avec close une fois mergé. list montre les revues du canal. Chaque étape notifie les intéressés.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['request', 'approve', 'changes', 'close', 'list'], description: 'Action à effectuer' },
+        to: { type: 'string', description: 'Le pair qui doit relire (pour request)' },
+        id: { type: 'string', description: "Id de la revue (ex: 'R1') pour approve/changes/close" },
+        title: { type: 'string', description: 'Objet de la revue (pour request)' },
+        note: { type: 'string', description: 'Contexte, retours ou justification' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'comm_overview',
+    description:
+      "Vue d'ensemble du canal en un appel : cap et feuille de route (avec progression par jalon), sessions et leur état live, tâches ouvertes, revues en attente, verrous, dernières notes. À consulter en début de session et entre deux tâches pour rester synchronisé.",
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'comm_lock',
@@ -762,11 +871,11 @@ const TOOLS = [
   {
     name: 'comm_wait',
     description:
-      "Attente bloquante d'un événement pour se synchroniser en direct : until=message (un message arrive), peer_status (l'état d'un pair change), tasks (le tableau de tâches change), locks (des chemins se libèrent). Retourne dès que l'événement survient ou à expiration du timeout.",
+      "Attente bloquante d'un événement pour se synchroniser en direct : until=message (un message arrive), peer_status (l'état d'un pair change), tasks (le tableau de tâches change), plan (la feuille de route change), reviews (une revue évolue), locks (des chemins se libèrent). Retourne dès que l'événement survient ou à expiration du timeout.",
     inputSchema: {
       type: 'object',
       properties: {
-        until: { type: 'string', enum: ['message', 'peer_status', 'tasks', 'locks'], description: 'Événement attendu' },
+        until: { type: 'string', enum: ['message', 'peer_status', 'tasks', 'plan', 'reviews', 'locks'], description: 'Événement attendu' },
         peer: { type: 'string', description: 'Pair à surveiller (pour peer_status)' },
         paths: { type: 'array', items: { type: 'string' }, description: 'Chemins à surveiller (pour locks)' },
         timeout_seconds: { type: 'number', description: `Timeout en secondes (défaut: 60, max: ${MAX_WAIT_S})` },
@@ -885,6 +994,8 @@ const HANDLERS = {
       case 'claimed':
         await api.heartbeat({ state: 'working', task: `${r.task.id}: ${r.task.title}` });
         return `🔵 Tu prends :\n${formatTask(r.task)}`;
+      case 'assigned':
+        return `📌 ${r.task.id} assignée à ${r.to} (il sera notifié ; son prochain "next" la prendra en priorité) :\n${formatTask(r.task)}`;
       case 'done':
         return `✅ ${r.task.id} terminée. ${r.remaining} tâche(s) restante(s).` +
           (r.remaining ? ' Enchaîne avec comm_task action=next.' : ' 🎉 Tableau vide !');
@@ -930,6 +1041,72 @@ const HANDLERS = {
       .join('\n\n');
   },
 
+  async comm_plan(a) {
+    if (!a || !a.action) throw new Error('Paramètre requis : action.');
+    const r = await api.planOp(a);
+    switch (r.type) {
+      case 'goal':
+        return `🎯 Cap fixé : ${r.goal}\n🔔 Les pairs ont été notifiés.`;
+      case 'milestone':
+        return `${a.action === 'add' ? '✅ Jalon ajouté à la feuille de route' : '✅ Jalon mis à jour'} :\n${formatMilestone(r.milestone)}\n🔔 Les pairs ont été notifiés.`;
+      case 'plan': {
+        const tl = await api.taskOp({ action: 'list' });
+        return `🗺️ Feuille de route (canal "${CHANNEL}") :\n\n${formatPlan(r.plan, tl.tasks)}`;
+      }
+      default:
+        return JSON.stringify(r);
+    }
+  },
+
+  async comm_review(a) {
+    if (!a || !a.action) throw new Error('Paramètre requis : action.');
+    if (a.action === 'request') {
+      // joint automatiquement un résumé du diff courant pour le relecteur
+      a = { ...a, diff: truncate(localDiff(CWD, NAME, 'stat'), 4000) };
+    }
+    const r = await api.reviewOp(a);
+    if (r.type === 'review') {
+      const rv = r.review;
+      const extra = {
+        request: `\n🔔 ${rv.to} a été notifié. Ton diff (stat) est joint ; il peut voir le détail avec comm_diff peer=${rv.from}.` +
+          `\nAttends son verdict avec comm_wait until=reviews, ou continue sur une autre tâche.`,
+        approve: `\n🔔 ${rv.from} a été notifié : il peut merger puis clore avec comm_review action=close.`,
+        changes: `\n🔔 ${rv.from} a été notifié des changements demandés.`,
+        close: '',
+      }[a.action] || '';
+      return `🔍 ${rv.id} → ${rv.status}\n${formatReview(rv)}${extra}`;
+    }
+    const open = r.reviews.filter((x) => x.status === 'pending' || x.status === 'changes_requested');
+    const closed = r.reviews.filter((x) => x.status === 'approved' || x.status === 'closed');
+    if (!r.reviews.length) return 'Aucune revue sur ce canal. Demandes-en une avec comm_review action=request.';
+    let out = `🔍 Revues (canal "${CHANNEL}") :\n\n` +
+      (open.length ? open.map(formatReview).join('\n') : '(aucune revue en attente)');
+    if (closed.length) out += `\n\nTerminées :\n${closed.slice(-5).map(formatReview).join('\n')}`;
+    return out;
+  },
+
+  async comm_overview() {
+    const snap = await api.snapshot();
+    const notesR = await api.noteOp({ action: 'list', limit: 5 });
+    const openTasks = snap.tasks.tasks.filter((t) => t.status !== 'done');
+    const openReviews = (snap.reviews.items || [])
+      .filter((x) => x.status === 'pending' || x.status === 'changes_requested');
+    const parts = [`# Vue d'ensemble — canal "${CHANNEL}"`];
+    parts.push(`## 🗺️ Feuille de route\n${formatPlan(snap.plan, snap.tasks.tasks)}`);
+    parts.push(`## 👥 Sessions\n${snap.sessions.length ? snap.sessions.map((s) => describeSession(s)).join('\n') : '(aucune)'}`);
+    parts.push(`## 📋 Tâches ouvertes (${openTasks.length})\n${openTasks.length ? openTasks.map(formatTask).join('\n') : '(aucune — comm_task action=add pour en créer)'}`);
+    if (openReviews.length) {
+      parts.push(`## 🔍 Revues en attente\n${openReviews.map(formatReview).join('\n')}`);
+    }
+    if (snap.locks.length) {
+      parts.push(`## 🔒 Verrous\n${snap.locks.map((l) => `- ${l.path} → ${l.owner}${l.owner === NAME ? ' (moi)' : ''}${l.reason ? ` — ${l.reason}` : ''}`).join('\n')}`);
+    }
+    if (notesR.notes.length) {
+      parts.push(`## 📓 Dernières notes\n${notesR.notes.map((n) => `- [${n.by}] ${n.text}`).join('\n')}`);
+    }
+    return parts.join('\n\n');
+  },
+
   async comm_wait(a) {
     if (!a || !a.until) throw new Error('Paramètre requis : until.');
     const timeout = Math.min(Math.max(Number(a.timeout_seconds) || 60, 1), MAX_WAIT_S);
@@ -952,6 +1129,8 @@ const HANDLERS = {
     let baselinePeer = a.until === 'peer_status'
       ? stripped(snap.sessions.find((s) => s.name === peerName)) : null;
     let baselineTasks = a.until === 'tasks' ? JSON.stringify(snap.tasks) : null;
+    let baselinePlan = a.until === 'plan' ? JSON.stringify(snap.plan) : null;
+    let baselineReviews = a.until === 'reviews' ? JSON.stringify(snap.reviews) : null;
 
     const evaluate = (cur) => {
       if (a.until === 'peer_status') {
@@ -962,6 +1141,13 @@ const HANDLERS = {
       }
       if (a.until === 'tasks' && JSON.stringify(cur.tasks) !== baselineTasks) {
         return `⚡ Le tableau de tâches a changé (après ${elapsed()}s) :\n\n${formatBoard(cur.tasks.tasks)}`;
+      }
+      if (a.until === 'plan' && JSON.stringify(cur.plan) !== baselinePlan) {
+        return `⚡ La feuille de route a changé (après ${elapsed()}s) :\n\n${formatPlan(cur.plan, cur.tasks.tasks)}`;
+      }
+      if (a.until === 'reviews' && JSON.stringify(cur.reviews) !== baselineReviews) {
+        const items = (cur.reviews.items || []).slice(-5);
+        return `⚡ Les revues ont évolué (après ${elapsed()}s) :\n${items.map(formatReview).join('\n')}`;
       }
       if (a.until === 'locks') {
         const others = cur.locks.filter((l) => l.owner !== NAME);
@@ -996,26 +1182,62 @@ function timeoutText(until, timeout) {
 }
 
 // ---------------------------------------------------------------------------
-// Mode CLI (inspection humaine) : node server.js status
+// Mode CLI : participation et supervision humaines
+//   node server.js status               → tableau de bord du canal
+//   node server.js send <pair|*> <msg>  → envoyer un message aux sessions
+//   node server.js inbox                → lire les réponses
+// (définir CLAUDE_COMM_NAME pour avoir une identité stable, ex: "patron")
 // ---------------------------------------------------------------------------
 
-if (ARGS._[0] === 'status') {
-  (async () => {
+const CLI_COMMANDS = {
+  async status() {
     if (MODE === 'file') ensureDir(CHAN_DIR);
     const snap = await api.snapshot();
     const notes = MODE === 'file' ? readJSON(NOTES_FILE, []) : null;
     console.log(`# claude-comm — canal "${CHANNEL}" (${MODE === 'relay' ? `relais ${RELAY_URL}` : `hub ${CHAN_DIR}`})\n`);
-    console.log('## Sessions');
+    console.log('## Feuille de route');
+    console.log(formatPlan(snap.plan, snap.tasks.tasks));
+    console.log('\n## Sessions');
     console.log(snap.sessions.length ? snap.sessions.map((s) => describeSession(s, true)).join('\n\n') : '(aucune)');
     console.log('\n## Tâches');
     console.log(snap.tasks.tasks.length ? snap.tasks.tasks.map(formatTask).join('\n') : '(aucune)');
+    console.log('\n## Revues');
+    const items = snap.reviews.items || [];
+    console.log(items.length ? items.map(formatReview).join('\n') : '(aucune)');
     console.log('\n## Verrous');
     console.log(snap.locks.length ? snap.locks.map((l) => `- ${l.path} → ${l.owner} (${ago(l.ts)})`).join('\n') : '(aucun)');
     if (notes && notes.length) console.log(`\n## Journal : ${notes.length} note(s)`);
     for (const [name, n] of Object.entries(snap.inbox_counts || {})) {
       if (n) console.log(`\n📬 ${name} : ${n} message(s) non lu(s)`);
     }
-  })().then(() => process.exit(0), (e) => { console.error(`❌ ${e.message}`); process.exit(1); });
+  },
+
+  async send() {
+    const to = ARGS._[1];
+    const message = ARGS._.slice(2).join(' ');
+    if (!to || !message) {
+      console.error('Usage : node server.js send <pair|*> <message...>');
+      process.exit(1);
+    }
+    if (!NAME_PROVIDED) {
+      console.error(`⚠️ CLAUDE_COMM_NAME non défini : tu apparais comme "${NAME}" (nom jetable). ` +
+        `Définis-le (ex: CLAUDE_COMM_NAME=patron) pour recevoir les réponses.`);
+    }
+    await api.heartbeat({ role: ROLE || 'humain' });
+    const r = await api.send({ to, body: message, kind: 'message' });
+    console.log(`📤 Envoyé à ${r.targets.join(', ')} (id ${r.id}). Lis les réponses avec : node server.js inbox`);
+  },
+
+  async inbox() {
+    await api.heartbeat({ role: ROLE || 'humain' });
+    const msgs = await api.inboxRead({ consume: true });
+    console.log(msgs.length ? msgs.map(formatMessage).join('\n\n') : '📭 Boîte vide.');
+  },
+};
+
+if (CLI_COMMANDS[ARGS._[0]]) {
+  CLI_COMMANDS[ARGS._[0]]()
+    .then(() => process.exit(0), (e) => { console.error(`❌ ${e.message}`); process.exit(1); });
 } else {
   startMcp();
 }
@@ -1045,7 +1267,7 @@ function startMcp() {
         respond(id, {
           protocolVersion: (params && params.protocolVersion) || '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'claude-comm', version: '2.0.0' },
+          serverInfo: { name: 'claude-comm', version: '3.0.0' },
           instructions:
             `Tu es connecté au canal de coordination "${CHANNEL}" sous le nom "${NAME}"` +
             `${MODE === 'relay' ? ` via le relais ${RELAY_URL}` : ''}. ` +
