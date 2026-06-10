@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "comm": {
+      "command": "node",
+      "args": ["/chemin/vers/Claude-communicator/server.js"]
+    }
+  }
+}

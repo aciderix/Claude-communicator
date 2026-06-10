@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /chemin/vers/Claude-communicator/hooks/comm-hook.js"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /chemin/vers/Claude-communicator/hooks/comm-hook.js"
+          }
+        ]
+      }
+    ]
+  }
+}
