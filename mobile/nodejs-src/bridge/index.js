@@ -44,8 +44,14 @@ function makeChannel(name) {
 const channel = makeChannel('EVENT_CHANNEL');
 const appChannel = makeChannel('APP_CHANNEL');
 
+// Chemin de stockage de données fourni par le plugin via DATADIR
+// (sandbox applicatif Android — seul emplacement inscriptible fiable).
+function getDataPath() {
+  return process.env.DATADIR || require('os').tmpdir();
+}
+
 // Signale au plugin que le projet Node a démarré : résout whenReady()
 // côté Capacitor et autorise les send() de l'app.
 appChannel.send('ready');
 
-module.exports = { channel };
+module.exports = { channel, getDataPath };

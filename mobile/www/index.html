@@ -121,7 +121,7 @@ async function ctlFetch(path, opts, timeoutMs = 3000) {
   } finally { clearTimeout(t); }
 }
 
-// Canal 1 : bridge natif du plugin.
+// Canal 1 : bridge natif du plugin (démarrage manuel → erreur native exacte).
 async function startViaBridge(payload) {
   const NodeJS = nodePlugin();
   if (!NodeJS) throw new Error('plugin natif absent');
@@ -132,9 +132,22 @@ async function startViaBridge(payload) {
     NodeJS.addListener('error', (e) => { clearTimeout(timer); reject(new Error(String(unwrap(e)))); });
     NodeJS.addListener('started', (e) => { clearTimeout(timer); resolve(unwrap(e)); });
   });
+
+  // Démarrage MANUEL : start() rejette avec la cause native exacte
+  // (copie du projet impossible, script introuvable, lib non chargée…).
+  dbg('NodeJS.start()…');
+  try {
+    await NodeJS.start();
+    dbg('NodeJS.start() ✅ (moteur lancé)');
+  } catch (e) {
+    const msg = String(unwrap(e) || (e && e.message) || e);
+    if (!/already been started/i.test(msg)) throw new Error(`moteur Node : ${msg}`);
+    dbg('moteur déjà démarré');
+  }
+
   await Promise.race([
     NodeJS.whenReady(),
-    sleep(15000).then(() => { throw new Error('bridge : whenReady muet (15 s)'); }),
+    sleep(15000).then(() => { throw new Error('bridge : whenReady muet (15 s) après start'); }),
   ]);
   dbg('bridge : whenReady ✅');
   await NodeJS.send({ eventName: 'start', args: [payload] });
@@ -179,6 +192,9 @@ async function startHost() {
     dbg('démarré via le bridge natif ✅');
     return info;
   } catch (e) {
+    // Échec NATIF du moteur (lib/copie/script) : pas de repli possible,
+    // on remonte la vraie cause au lieu de la masquer.
+    if (/^moteur Node :/.test(e.message)) throw e;
     dbg(`bridge KO (${e.message}) → repli sur le canal HTTP`);
   }
   status('Démarrage via le canal HTTP local…');
