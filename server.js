@@ -488,7 +488,12 @@ async function rfetch(method, p, body, timeoutMs = 35000) {
     try {
       res = await fetch(`${RELAY_URL}/c/${CHANNEL}${p}`, {
         method,
-        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        headers: {
+          authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+          // contourne la page interstitielle des tunnels type loca.lt
+          'bypass-tunnel-reminder': '1',
+        },
         body: body ? JSON.stringify(body) : undefined,
         signal: ctl.signal,
       });

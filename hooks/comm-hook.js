@@ -50,7 +50,11 @@ async function rfetch(method, p, body) {
   try {
     const res = await fetch(`${RELAY}/c/${CHANNEL}${p}`, {
       method,
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+        'bypass-tunnel-reminder': '1',
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
     });

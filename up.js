@@ -125,6 +125,43 @@ function writeHooks() {
 // --- 6. tunnel public optionnel ----------------------------------------------
 
 async function startTunnel(kind) {
+  if (kind === 'localtunnel' || kind === 'lt') {
+    // Client 100 % Node (via npx) : fonctionne partout où Node tourne,
+    // y compris Termux. Les navigateurs voient une page « tunnel password »
+    // au premier accès (réponse : votre IP publique) ; les appels API avec
+    // l'en-tête bypass-tunnel-reminder (envoyé par claude-comm) passent direct.
+    const child = spawn('npx', ['-y', 'localtunnel', '--port', String(PORT), '--local-host', '127.0.0.1'],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+    children.push(child);
+    console.error('⏳ Tunnel localtunnel via npx (premier lancement : téléchargement du paquet)…');
+    return new Promise((resolve) => {
+      let buf = '';
+      let resolved = false;
+      const finish = (v) => { if (!resolved) { resolved = true; resolve(v); } };
+      const timer = setTimeout(() => {
+        if (buf.trim()) console.error(`⚠️  localtunnel sans URL après 90 s :\n    ${buf.trim().split('\n').slice(-3).join('\n    ')}`);
+        finish(null);
+      }, 90000);
+      const scan = (d) => {
+        buf += d;
+        const m = buf.match(/https:\/\/[a-z0-9-]+\.loca\.lt/);
+        if (m) {
+          clearTimeout(timer);
+          if (resolved) console.log(`\n🌐 Tunnel établi (tardivement) — URL publique : ${m[0]}\n`);
+          finish(m[0]);
+        }
+      };
+      child.stdout.on('data', scan);
+      child.stderr.on('data', scan);
+      child.on('exit', (code) => {
+        if (!resolved) {
+          clearTimeout(timer);
+          console.error(`⚠️  localtunnel s'est arrêté (code ${code}).${buf.trim() ? `\n    ${buf.trim().split('\n').slice(-3).join('\n    ')}` : ''}`);
+          finish(null);
+        }
+      });
+    });
+  }
   if (kind === 'pinggy') {
     // Tunnel SSH sur le port 443 (Termux : pkg install openssh).
     // Gratuit sans compte ; sessions limitées à ~60 min, relancer au besoin.
