@@ -240,6 +240,29 @@ navigateur, saisissez le jeton (gardé en localStorage) et le canal.
 Astuce : même sur une seule machine, lancer le relais en local
 (`node relay.js`) donne accès au dashboard.
 
+## Termux (Android) : héberger le relais sur un téléphone
+
+Testé en conditions réelles — le relais et le dashboard tournent très bien
+dans [Termux](https://termux.dev) :
+
+```bash
+pkg install nodejs git openssh
+git clone https://github.com/aciderix/claude-communicator.git
+cd claude-communicator
+termux-wake-lock          # empêche Android de tuer le relais écran éteint
+node up.js --tunnel pinggy
+```
+
+Particularités Android :
+
+- **Tunnel : utilisez `--tunnel pinggy`** (SSH sur le port 443). Le binaire
+  officiel cloudflared linux-arm64 ne fonctionne pas sur certains
+  appareils Android (arrêt immédiat, code 1).
+- Si `password:` s'affiche pour pinggy, **appuyez simplement sur Entrée**
+  (mode anonyme). URL gratuite valable ~60 min ; relancez `up.js` pour en
+  obtenir une nouvelle (le relais et son état sont réutilisés tels quels).
+- Le dashboard local du téléphone est sur `http://127.0.0.1:8787`.
+
 ## Disponibilité du pair : limite d'usage, compaction
 
 Avec les hooks branchés (voir plus bas), chaque session sait ce qui arrive
