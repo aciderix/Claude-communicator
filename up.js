@@ -133,19 +133,39 @@ async function startTunnel(kind) {
     const child = spawn('ssh', ['-p', '443',
       '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
       '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes',
+      // auth "none" d'abord (souvent aucun prompt) ; sinon prompt mot de
+      // passe : il suffit d'appuyer sur Entrée (mode anonyme pinggy)
+      '-o', 'PreferredAuthentications=none,password',
       `-R0:127.0.0.1:${PORT}`, 'qr@free.pinggy.io'],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child);
+    console.error('⏳ Tunnel pinggy via SSH… Si « password: » s\'affiche, appuie simplement sur Entrée.');
     const url = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), 25000);
       let buf = '';
+      let resolved = false;
+      const finish = (v) => { if (!resolved) { resolved = true; resolve(v); } };
+      const timer = setTimeout(() => {
+        console.error('⚠️  Pas d\'URL pinggy après 75 s. Si le prompt « password: » est affiché, appuie sur Entrée — l\'URL s\'affichera ci-dessous.');
+        finish(null);
+      }, 75000);
       const scan = (d) => {
         buf += d;
         const m = buf.match(/https:\/\/[a-z0-9.-]+\.pinggy\.link/i);
-        if (m) { clearTimeout(timer); resolve(m[0]); }
+        if (m) {
+          clearTimeout(timer);
+          if (resolved) console.log(`\n🌐 Tunnel établi (tardivement) — URL publique : ${m[0]}\n`);
+          finish(m[0]);
+        }
       };
       child.stdout.on('data', scan);
       child.stderr.on('data', scan);
+      child.on('exit', (code) => {
+        if (!resolved) {
+          clearTimeout(timer);
+          console.error(`⚠️  ssh s'est arrêté (code ${code}).${buf.trim() ? `\n    ${buf.trim().split('\n').slice(-3).join('\n    ')}` : ''}`);
+          finish(null);
+        }
+      });
     });
     if (url) console.error('ℹ️  Tunnel pinggy gratuit : ~60 min par session, relance up.js si l\'URL expire.');
     return url;
