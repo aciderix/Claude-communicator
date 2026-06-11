@@ -80,13 +80,17 @@
 
 <div id="login" class="panel">
   <h2>Connexion</h2>
-  <label>URL du relais (laisser vide si ce dashboard est servi par le relais)</label>
-  <input id="in-url" placeholder="https://relay.exemple.com:8787">
+  <label>Code d'appairage (6 chiffres, affiché au lancement du relais)</label>
+  <input id="in-pair" inputmode="numeric" placeholder="123456" maxlength="6">
+  <p class="dim">— ou avec le jeton complet —</p>
   <label>Jeton (secret du relais)</label>
   <input id="in-token" type="password">
+  <label>URL du relais (laisser vide si ce dashboard est servi par le relais)</label>
+  <input id="in-url" placeholder="https://relay.exemple.com:8787">
   <label>Canal</label>
   <input id="in-channel" value="default">
   <p><button class="primary" onclick="login()">Se connecter</button></p>
+  <p id="login-err" class="dim"></p>
   <p class="dim">Le jeton reste dans ce navigateur (localStorage) et n'est envoyé qu'au relais.</p>
 </div>
 
@@ -180,10 +184,24 @@ function setStatus(text, cls) {
   el.className = cls || '';
 }
 
-function login() {
+async function login() {
   BASE = $('in-url').value.trim().replace(/\/+$/, '');
   TOKEN = $('in-token').value.trim();
   CHANNEL = $('in-channel').value.trim() || 'default';
+  const code = $('in-pair').value.trim();
+  if (!TOKEN && code) {
+    try {
+      const r = await fetch(`${BASE}/pair`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { $('login-err').textContent = `❌ ${data.error || `HTTP ${r.status}`}`; return; }
+      TOKEN = data.token;
+    } catch (e) { $('login-err').textContent = `❌ relais injoignable : ${e.message}`; return; }
+  }
+  if (!TOKEN) { $('login-err').textContent = '❌ saisis un code d\'appairage ou un jeton.'; return; }
   localStorage.setItem('cc_url', BASE);
   localStorage.setItem('cc_token', TOKEN);
   localStorage.setItem('cc_channel', CHANNEL);
@@ -378,6 +396,13 @@ $('msg')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMsg();
 });
 
+// Pré-remplissage : #t=<jeton>&c=<canal> dans l'URL, sinon localStorage.
+(() => {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('t')) { TOKEN = h.get('t'); localStorage.setItem('cc_token', TOKEN); }
+  if (h.get('c')) { CHANNEL = h.get('c'); localStorage.setItem('cc_channel', CHANNEL); }
+  if (h.get('t')) history.replaceState(null, '', location.pathname);
+})();
 if (TOKEN) { $('in-token').value = TOKEN; $('in-url').value = BASE; $('in-channel').value = CHANNEL; start(); }
 </script>
 </body>

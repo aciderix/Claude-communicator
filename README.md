@@ -63,6 +63,32 @@ git clone https://github.com/aciderix/claude-communicator.git
 
 C'est tout — aucun `npm install` nécessaire.
 
+## Démarrage en UNE commande (recommandé)
+
+```bash
+node up.js --project /chemin/de/ton/projet
+```
+
+Autonome (aucun service tiers) : lance le relais sur le LAN avec
+persistance, écrit le `.mcp.json` du projet (sans secret → committable),
+et affiche tout ce qu'il faut :
+
+- **📱 mobile** : une URL locale (`http://192.168.x.x:8787`) + un **code
+  d'appairage à 6 chiffres** à taper dans le dashboard (pas de jeton de
+  43 caractères à recopier ; code valable 15 min, 20 essais max, rotation
+  automatique) ;
+- **💻 sessions** : la commande exacte à coller dans chaque terminal
+  (`CLAUDE_COMM_NAME=alice ... claude`) ;
+- **🧑 humain** : les commandes CLI prêtes à l'emploi.
+
+Options : `--sessions alice,bob,charlie` (noms), `--channel equipe`,
+`--port`, `--hooks` (branche les hooks de notification/compaction dans
+`.claude/settings.json`, en préservant l'existant avec sauvegarde
+`.bak`), et `--tunnel cloudflared|ngrok` pour ajouter une URL publique
+quand tu veux accéder de l'extérieur (le tunnel est le seul élément
+tiers, et il est optionnel — cloudflared est téléchargé automatiquement
+sous Linux s'il manque). Ctrl+C arrête tout.
+
 ## Démarrage rapide — même machine (mode fichier)
 
 **1. Déclarer le serveur MCP** dans le projet (`.mcp.json` à la racine) :

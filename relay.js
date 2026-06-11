@@ -72,6 +72,21 @@ if (!SECRET) {
 }
 const SECRET_HASH = crypto.createHash('sha256').update(SECRET).digest();
 
+// Appairage mobile : un code à 6 chiffres, court à taper sur un téléphone,
+// échangeable contre le jeton via POST /pair. Activé avec --pair.
+// Protections : validité 15 min, 20 tentatives max, puis rotation du code.
+const PAIR_ENABLED = !!(ARGS.pair || process.env.CLAUDE_COMM_RELAY_PAIR);
+let pairing = null;
+function newPairCode(quiet = false) {
+  if (!PAIR_ENABLED) return;
+  pairing = {
+    code: String(crypto.randomInt(100000, 1000000)),
+    expiresAt: Date.now() + 15 * 60000,
+    attempts: 0,
+  };
+  if (!quiet) console.error(`📱 Code d'appairage dashboard : ${pairing.code}  (valable 15 min)`);
+}
+
 const LIMITS = {
   channels: 100,
   sessionsPerChannel: 64,
@@ -311,6 +326,20 @@ async function handle(req, res) {
   if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/dashboard') && DASHBOARD_HTML) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     return res.end(DASHBOARD_HTML);
+  }
+  if (req.method === 'POST' && u.pathname === '/pair') {
+    if (!PAIR_ENABLED || !pairing) return json(res, 404, { error: 'Appairage désactivé sur ce relais.' });
+    if (rateLimited(req.socket.remoteAddress || '?')) return json(res, 429, { error: 'Débit trop élevé.' });
+    const body = await readBody(req);
+    if (Date.now() > pairing.expiresAt || pairing.attempts >= 20) {
+      newPairCode();
+      return json(res, 410, { error: 'Code expiré ou trop de tentatives — un nouveau code vient d\'être affiché côté serveur.' });
+    }
+    if (String(body.code || '') !== pairing.code) {
+      pairing.attempts++;
+      return json(res, 401, { error: 'Code d\'appairage invalide.' });
+    }
+    return json(res, 200, { token: SECRET });
   }
   if (!tokenOk(req.headers.authorization)) {
     return json(res, 401, { error: 'Non autorisé : jeton Bearer manquant ou invalide.' });
@@ -580,6 +609,7 @@ const standupTimer = setInterval(() => {
   for (const ch of channels.values()) {
     try { maybeStandup(ch); } catch (e) { console.error('standup:', e.message); }
   }
+  if (PAIR_ENABLED && pairing && Date.now() > pairing.expiresAt) newPairCode();
 }, 60000);
 standupTimer.unref();
 
@@ -612,4 +642,5 @@ server.listen(PORT, HOST, () => {
     console.error('⚠️  Exposé sans TLS : place un reverse proxy HTTPS devant, ou utilise --tls-cert/--tls-key.');
   }
   if (DATA) console.error(`Persistance : ${DATA}`);
+  newPairCode();
 });

@@ -1,10 +1,11 @@
 {
   "name": "claude-comm",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Coordination en direct entre sessions Claude Code, sur une machine ou en multi-machines sécurisé : messagerie, état live, diff/fichiers du pair, feuille de route partagée, tâches avec dépendances, revues croisées, dashboard web temps réel, claim de réponse anti-gaspillage de tokens, questions à l'utilisateur, détection limite d'usage/compaction, standup périodique.",
   "bin": {
     "claude-comm": "./server.js",
-    "claude-comm-relay": "./relay.js"
+    "claude-comm-relay": "./relay.js",
+    "claude-comm-up": "./up.js"
   },
   "main": "server.js",
   "scripts": {

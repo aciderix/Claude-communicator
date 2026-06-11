@@ -66,16 +66,19 @@ function ok(cond, label) {
 
 (async () => {
   console.log('démarrage du relais');
-  const relay = spawn(process.execPath, [path.join(ROOT, 'relay.js'), '--port', String(PORT), '--secret', SECRET], {
+  const relay = spawn(process.execPath, [path.join(ROOT, 'relay.js'), '--port', String(PORT), '--secret', SECRET, '--pair'], {
     stdio: ['ignore', 'inherit', 'pipe'],
   });
+  let relayErr = '';
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('relais : pas de démarrage')), 8000);
     relay.stderr.on('data', (d) => {
+      relayErr += d;
       process.stderr.write(d);
-      if (String(d).includes("à l'écoute")) { clearTimeout(t); resolve(); }
+      if (relayErr.includes("à l'écoute")) { clearTimeout(t); resolve(); }
     });
   });
+  await sleep(300); // laisse le code d'appairage s'imprimer
 
   let alice, bob, mallory;
   try {
@@ -87,6 +90,18 @@ function ok(cond, label) {
     const health = await fetch(`${RELAY_URL}/healthz`);
     ok(health.status === 200, 'healthz accessible sans jeton');
     ok(execFileSync(process.execPath, [path.join(ROOT, 'relay.js'), 'gen-token'], { encoding: 'utf8' }).trim().length >= 32, 'gen-token produit un secret fort');
+
+    console.log('appairage mobile');
+    const pairCode = (relayErr.match(/appairage dashboard : (\d{6})/) || [])[1];
+    ok(pairCode, "code d'appairage à 6 chiffres affiché au démarrage");
+    const badPair = await fetch(`${RELAY_URL}/pair`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: '000000' }),
+    });
+    ok(badPair.status === 401, 'mauvais code d\'appairage refusé');
+    const goodPair = await (await fetch(`${RELAY_URL}/pair`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pairCode }),
+    })).json();
+    ok(goodPair.token === SECRET, 'bon code échangé contre le jeton');
 
     console.log('connexion des deux sessions via le relais');
     alice = new Client('alice');
