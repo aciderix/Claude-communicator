@@ -315,6 +315,18 @@ try {
   DASHBOARD_HTML = fs.readFileSync(path.join(__dirname, 'public', 'dashboard.html'), 'utf8');
 } catch { /* dashboard absent : routes API seulement */ }
 
+// Coquille PWA : fichiers statiques publics (aucune donnée du canal).
+const STATIC_FILES = {};
+for (const [route, file, type] of [
+  ['/manifest.webmanifest', 'manifest.webmanifest', 'application/manifest+json'],
+  ['/sw.js', 'sw.js', 'text/javascript; charset=utf-8'],
+  ['/icon.svg', 'icon.svg', 'image/svg+xml'],
+]) {
+  try {
+    STATIC_FILES[route] = { body: fs.readFileSync(path.join(__dirname, 'public', file)), type };
+  } catch { /* fichier absent */ }
+}
+
 async function handle(req, res) {
   const u = new URL(req.url, 'http://relay');
 
@@ -326,6 +338,11 @@ async function handle(req, res) {
   if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/dashboard') && DASHBOARD_HTML) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     return res.end(DASHBOARD_HTML);
+  }
+  if (req.method === 'GET' && STATIC_FILES[u.pathname]) {
+    const f = STATIC_FILES[u.pathname];
+    res.writeHead(200, { 'content-type': f.type, 'cache-control': 'no-store' });
+    return res.end(f.body);
   }
   if (req.method === 'POST' && u.pathname === '/pair') {
     if (!PAIR_ENABLED || !pairing) return json(res, 404, { error: 'Appairage désactivé sur ce relais.' });

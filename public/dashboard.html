@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#161b22">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <title>claude-comm — dashboard</title>
 <style>
   :root {
@@ -69,7 +72,8 @@
 <header>
   <h1>🛰 claude-comm</h1>
   <span id="hdr-controls" class="hidden">
-    <input id="channel" size="10" title="canal">
+    <input id="channel" size="10" title="canal" list="channel-list">
+    <datalist id="channel-list"></datalist>
     <button onclick="reconnect()">changer</button>
     <span class="dim">standup</span>
     <input id="standup" size="3" title="minutes (0 = off)">
@@ -212,6 +216,16 @@ function reconnect() {
   CHANNEL = $('channel').value.trim() || 'default';
   localStorage.setItem('cc_channel', CHANNEL);
   version = 0;
+  loadChannels();
+}
+
+async function loadChannels() {
+  try {
+    const r = await fetch(`${BASE}/channels`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    if (!r.ok) return;
+    const { channels } = await r.json();
+    $('channel-list').innerHTML = channels.map((c) => `<option value="${esc(c)}">`).join('');
+  } catch { /* hors-ligne */ }
 }
 
 async function start() {
@@ -220,6 +234,7 @@ async function start() {
   $('main').classList.remove('hidden');
   $('hdr-controls').classList.remove('hidden');
   $('channel').value = CHANNEL;
+  loadChannels();
   if (running) return;
   running = true;
   while (running) {
@@ -403,6 +418,12 @@ $('msg')?.addEventListener('keydown', (e) => {
   if (h.get('c')) { CHANNEL = h.get('c'); localStorage.setItem('cc_channel', CHANNEL); }
   if (h.get('t')) history.replaceState(null, '', location.pathname);
 })();
+// PWA : installable depuis le navigateur (le SW ne met en cache que la
+// coquille, jamais les données du canal). Uniquement si servi par le relais.
+if ('serviceWorker' in navigator && location.protocol !== 'file:' && !BASE) {
+  navigator.serviceWorker.register('/sw.js').catch(() => { /* hors PWA */ });
+}
+
 if (TOKEN) { $('in-token').value = TOKEN; $('in-url').value = BASE; $('in-channel').value = CHANNEL; start(); }
 </script>
 </body>

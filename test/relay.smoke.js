@@ -173,6 +173,12 @@ function ok(cond, label) {
     console.log('dashboard web');
     const dashHtml = await (await fetch(`${RELAY_URL}/`)).text();
     ok(dashHtml.includes('claude-comm') && dashHtml.includes('dashboard'), 'dashboard HTML servi sans jeton (données protégées)');
+    ok(dashHtml.includes('manifest.webmanifest'), 'dashboard lié au manifeste PWA');
+    const manifest = await (await fetch(`${RELAY_URL}/manifest.webmanifest`)).json();
+    ok(manifest.display === 'standalone', 'manifeste PWA servi (installable)');
+    const sw = await (await fetch(`${RELAY_URL}/sw.js`)).text();
+    ok(sw.includes('claude-comm-shell'), 'service worker servi');
+    ok((await fetch(`${RELAY_URL}/icon.svg`)).status === 200, 'icône servie');
     const H = { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' };
     const chans = await (await fetch(`${RELAY_URL}/channels`, { headers: H })).json();
     ok(chans.channels.includes('relay-test'), 'liste des canaux accessible avec jeton');
