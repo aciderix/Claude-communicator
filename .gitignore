@@ -6,3 +6,11 @@ app/relay/
 app/icon.png
 app/node_modules/
 app/dist/
+mobile/node_modules/
+mobile/www/nodejs/
+mobile/www/dashboard.html
+mobile/www/icon.svg
+mobile/android/app/build/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/capacitor-cordova-android-plugins/build/

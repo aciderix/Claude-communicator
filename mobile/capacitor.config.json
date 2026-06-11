@@ -1,0 +1,10 @@
+{
+  "appId": "dev.claudecomm.mobile",
+  "appName": "claude-comm",
+  "webDir": "www",
+  "plugins": {
+    "CapacitorNodeJS": {
+      "nodeDir": "nodejs"
+    }
+  }
+}

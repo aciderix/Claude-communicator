@@ -1,0 +1,9 @@
+{
+  "name": "claude-comm-embedded",
+  "version": "1.0.0",
+  "description": "Relais claude-comm embarqué dans l'app mobile (nodejs-mobile)",
+  "main": "main.js",
+  "dependencies": {
+    "localtunnel": "^2.0.2"
+  }
+}

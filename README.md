@@ -265,6 +265,28 @@ navigateur :
 
 Développement local : `cd app && npm install && npm start`.
 
+## Application mobile native (Android, sans Termux ni PWA)
+
+Une vraie app Android (`.apk`, construite par le même workflow
+GitHub Actions) qui fait **tout depuis l'app**, de la mise en route au
+dashboard :
+
+- **🏠 Héberger sur ce téléphone** : le relais tourne *dans* l'app grâce à
+  un moteur Node embarqué (nodejs-mobile via Capacitor) — plus besoin de
+  Termux. Secret généré et conservé, état persistant, exposition Internet
+  en une case à cocher (tunnel intégré), et l'app affiche l'adresse WiFi +
+  le jeton pour connecter les PC.
+- **🔌 Se connecter** : à un relais existant (cloud, app de bureau, autre
+  téléphone).
+- Le dashboard s'affiche ensuite directement dans l'app (pas de
+  navigateur). Le dossier `mobile/www/` est volontairement minimal : un
+  front React peut le remplacer tel quel, toute la plomberie native
+  (Node embarqué, canal de communication, config) est conservée.
+
+Build : onglet *Actions* → `build-app` → l'APK `claude-comm-android` est
+dans les artefacts (signature debug : installation par sideload —
+« sources inconnues »).
+
 ## Zéro manip au quotidien (relais hébergé)
 
 Les commandes (tunnels, exports, `up.js`…) n'existent que si vous hébergez
