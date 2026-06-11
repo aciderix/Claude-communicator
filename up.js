@@ -195,8 +195,11 @@ async function startTunnel(kind) {
     let buf = '';
     child.stderr.on('data', (d) => {
       buf += d;
-      const m = buf.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-      if (m) { clearTimeout(timer); resolve(m[0]); }
+      // ignorer api.trycloudflare.com (endpoint interne des logs cloudflared) :
+      // l'URL attribuée est du type https://mots-aleatoires.trycloudflare.com
+      const urls = buf.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/g) || [];
+      const real = urls.find((u) => u !== 'https://api.trycloudflare.com');
+      if (real) { clearTimeout(timer); resolve(real); }
     });
   });
 }
