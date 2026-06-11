@@ -2,6 +2,12 @@
   "appId": "dev.claudecomm.mobile",
   "appName": "claude-comm",
   "webDir": "www",
+  "server": {
+    "androidScheme": "http"
+  },
+  "android": {
+    "allowMixedContent": true
+  },
   "plugins": {
     "CapacitorNodeJS": {
       "nodeDir": "nodejs"

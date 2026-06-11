@@ -222,9 +222,20 @@ function json(res, status, obj) {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
+    ...CORS_HEADERS,
   });
   res.end(body);
 }
+
+// CORS : nécessaire pour les apps (mobile/desktop) dont la WebView a sa
+// propre origine. Sans cookies, l'authentification reste le jeton Bearer
+// explicite : autoriser toutes les origines n'affaiblit rien.
+const CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, PUT, OPTIONS',
+  'access-control-allow-headers': 'authorization, content-type, bypass-tunnel-reminder',
+  'access-control-max-age': '86400',
+};
 
 function tokenOk(header) {
   if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
@@ -330,6 +341,10 @@ for (const [route, file, type] of [
 async function handle(req, res) {
   const u = new URL(req.url, 'http://relay');
 
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    return res.end();
+  }
   if (req.method === 'GET' && u.pathname === '/healthz') {
     return json(res, 200, { ok: true });
   }

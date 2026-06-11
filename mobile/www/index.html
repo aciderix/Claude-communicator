@@ -109,40 +109,82 @@ function unwrap(event) {
   return event;
 }
 
-async function startHost(channel) {
-  const C = window.Capacitor;
-  dbg(`plugins disponibles : ${C && C.Plugins ? Object.keys(C.Plugins).join(', ') : 'aucun (Capacitor absent)'}`);
+const CTL = 'http://127.0.0.1:8788';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function ctlFetch(path, opts, timeoutMs = 3000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(`${CTL}${path}`, { ...opts, signal: ctl.signal });
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+// Canal 1 : bridge natif du plugin.
+async function startViaBridge(payload) {
   const NodeJS = nodePlugin();
-  if (!NodeJS) throw new Error("plugin Node introuvable (build incomplet de l'app)");
-
-  // écouteurs posés AVANT toute attente pour ne rien rater
+  if (!NodeJS) throw new Error('plugin natif absent');
   const result = new Promise((resolve, reject) => {
-    const fail = (m) => reject(new Error(m));
-    const globalTimer = setTimeout(() =>
-      fail('le moteur Node embarqué ne répond pas (45 s) — projet Node planté au démarrage ?'), 45000);
-    NodeJS.addListener('node-ready', () => dbg('moteur Node : projet démarré ✅'));
+    const timer = setTimeout(() => reject(new Error('bridge : pas de réponse started (15 s)')), 15000);
+    NodeJS.addListener('node-ready', () => dbg('bridge : projet Node prêt'));
     NodeJS.addListener('log', (e) => dbg(`node: ${unwrap(e)}`));
-    NodeJS.addListener('error', (e) => {
-      clearTimeout(globalTimer);
-      fail(String(unwrap(e) || 'erreur du relais embarqué'));
-    });
-    NodeJS.addListener('started', (e) => {
-      clearTimeout(globalTimer);
-      resolve(unwrap(e));
-    });
+    NodeJS.addListener('error', (e) => { clearTimeout(timer); reject(new Error(String(unwrap(e)))); });
+    NodeJS.addListener('started', (e) => { clearTimeout(timer); resolve(unwrap(e)); });
   });
-
-  status('Démarrage du moteur Node embarqué…');
-  dbg('whenReady()…');
   await Promise.race([
     NodeJS.whenReady(),
-    new Promise((_r, rej) => setTimeout(() =>
-      rej(new Error('whenReady sans réponse (30 s) : le projet Node embarqué n\'a pas émis "ready"')), 30000)),
+    sleep(15000).then(() => { throw new Error('bridge : whenReady muet (15 s)'); }),
   ]);
-  dbg('whenReady ✅ — envoi de start');
-  status('Démarrage du relais…');
-  await NodeJS.send({ eventName: 'start', args: [{ port: 8787, expose: $('expose').checked }] });
+  dbg('bridge : whenReady ✅');
+  await NodeJS.send({ eventName: 'start', args: [payload] });
   return result;
+}
+
+// Canal 2 : contrôle HTTP local (indépendant du bridge).
+async function startViaHttp(payload) {
+  dbg('canal HTTP : recherche du moteur Node (127.0.0.1:8788)…');
+  let diag = null;
+  for (let i = 0; i < 30 && !diag; i++) {
+    try { diag = await ctlFetch('/diag'); } catch { await sleep(1500); }
+  }
+  if (!diag) {
+    throw new Error('moteur Node embarqué injoignable : ni bridge, ni serveur de contrôle. ' +
+      'Le moteur natif n\'a probablement pas démarré (voir logcat).');
+  }
+  dbg(`diag : bridge=${diag.bridge} | ${diag.steps.slice(-2).join(' | ')}`);
+  for (const err of diag.errors || []) dbg(`diag(err) : ${err}`);
+  const r = await ctlFetch('/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  }, 30000);
+  if (r && r.error) throw new Error(r.error);
+  // attend l'éventuel tunnel
+  for (let i = 0; i < 20; i++) {
+    const st = await ctlFetch('/status').catch(() => null);
+    if (st && st.started && (!payload.expose || st.info.publicUrl || i > 10)) return st.info;
+    await sleep(1500);
+  }
+  throw new Error('le relais ne confirme pas son démarrage');
+}
+
+async function startHost() {
+  const C = window.Capacitor;
+  dbg(`plugins : ${C && C.Plugins ? Object.keys(C.Plugins).join(', ') : 'aucun (Capacitor absent)'}`);
+  const payload = { port: 8787, expose: $('expose').checked };
+  status('Démarrage du moteur Node embarqué…');
+  try {
+    const info = await startViaBridge(payload);
+    dbg('démarré via le bridge natif ✅');
+    return info;
+  } catch (e) {
+    dbg(`bridge KO (${e.message}) → repli sur le canal HTTP`);
+  }
+  status('Démarrage via le canal HTTP local…');
+  const info = await startViaHttp(payload);
+  dbg('démarré via le canal HTTP ✅');
+  return info;
 }
 
 async function go() {
@@ -153,7 +195,7 @@ async function go() {
   try {
     if (mode === 'host') {
       localStorage.setItem('cc_mode', 'host');
-      const info = await startHost(channel);
+      const info = await startHost();
       const lines = [`📶 Même WiFi : http://${info.lanIp || '?'}:${info.port}`];
       if (info.publicUrl) lines.push(`🌍 Internet : ${info.publicUrl}`);
       lines.push(`🔑 Jeton : ${info.secret}`);
