@@ -80,9 +80,12 @@ function writeMcpJson() {
     return null;
   }
   const file = path.join(PROJECT, '.mcp.json');
+  const serverAbs = path.join(ROOT, 'server.js');
+  const rel = path.relative(PROJECT, serverAbs);
+  const serverPath = rel.startsWith('..') ? serverAbs : `./${rel}`;
   let json = {};
   try { json = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* absent */ }
-  const entry = { command: 'node', args: [path.join(ROOT, 'server.js')] };
+  const entry = { command: 'node', args: [serverPath] };
   const existing = JSON.stringify((json.mcpServers || {}).comm);
   if (existing && existing !== JSON.stringify(entry)) {
     fs.copyFileSync(file, `${file}.bak`);
