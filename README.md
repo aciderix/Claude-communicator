@@ -240,6 +240,50 @@ navigateur, saisissez le jeton (gardé en localStorage) et le canal.
 Astuce : même sur une seule machine, lancer le relais en local
 (`node relay.js`) donne accès au dashboard.
 
+## Zéro manip au quotidien (mode « app »)
+
+Les commandes (tunnels, exports, `up.js`…) n'existent que si vous hébergez
+le relais sur un appareil personnel. Pour ne **plus jamais taper de
+commande**, déplacez le relais vers un hébergeur une bonne fois pour
+toutes :
+
+**1. Hébergez le relais (5 min, une seule fois)**
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/aciderix/claude-communicator)
+
+Un clic → URL HTTPS stable (`https://votre-relais.onrender.com`), secret
+généré automatiquement (visible dans les variables d'environnement Render).
+Alternative : `Dockerfile` fourni pour n'importe quel hébergeur/VPS/NAS.
+Plus de tunnel, plus de Termux, plus d'URL qui change.
+
+**2. Sur chaque machine de travail (une seule fois)**
+
+```bash
+node server.js login https://votre-relais.onrender.com <jeton>
+claude mcp add comm --scope user -- node /chemin/claude-communicator/server.js
+```
+
+La connexion est mémorisée (`~/.claude-comm/credentials.json`, mode 600) et
+les outils comm_* sont disponibles dans **tous** vos projets.
+
+**3. Sur le téléphone (une seule fois)**
+
+Ouvrez l'URL du relais → code d'appairage ou jeton → menu ⋮ →
+*Installer l'application* : le dashboard devient une app (PWA) avec icône
+et plein écran.
+
+**4. Au quotidien : rien.**
+
+Vous lancez `claude` (les noms de session sont auto-générés si absents),
+les IA se coordonnent seules, et l'app sur votre téléphone montre tout en
+direct, où que vous soyez.
+
+> Plan free Render : l'instance s'endort après inactivité et l'état est en
+> mémoire — suffisant pour coordonner des sessions actives. Pour un état
+> persistant (historique long, feuille de route au long cours) : plan
+> starter + disque (voir `render.yaml`), ou n'importe quel VPS avec
+> `--data`.
+
 ## Termux (Android) : héberger le relais sur un téléphone
 
 Testé en conditions réelles — le relais et le dashboard tournent très bien
@@ -262,6 +306,11 @@ Particularités Android :
   (mode anonyme). URL gratuite valable ~60 min ; relancez `up.js` pour en
   obtenir une nouvelle (le relais et son état sont réutilisés tels quels).
 - Le dashboard local du téléphone est sur `http://127.0.0.1:8787`.
+- **Démarrage automatique au boot du téléphone** : installez l'app
+  Termux:Boot (F-Droid) puis copiez
+  [`termux/boot-claude-comm.sh`](termux/boot-claude-comm.sh) dans
+  `~/.termux/boot/` — le relais et son tunnel se lancent seuls à chaque
+  redémarrage (journal dans `~/.claude-comm/up.log`).
 
 ## Disponibilité du pair : limite d'usage, compaction
 

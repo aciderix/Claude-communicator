@@ -56,14 +56,22 @@ const ARGS = parseArgs(process.argv.slice(2));
 const HUB = path.resolve(
   ARGS.hub || process.env.CLAUDE_COMM_HUB || path.join(os.homedir(), '.claude-comm')
 );
-const CHANNEL = sanitizeName(ARGS.channel || process.env.CLAUDE_COMM_CHANNEL || 'default');
+
+// Identifiants mémorisés par `node server.js login <url> <token> [canal]` :
+// permet de lancer toute session sans variable d'environnement.
+const CREDENTIALS_FILE = path.join(os.homedir(), '.claude-comm', 'credentials.json');
+const CRED = (ARGS.relay || process.env.CLAUDE_COMM_RELAY)
+  ? {}
+  : (() => { try { return JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8')); } catch { return {}; } })();
+
+const CHANNEL = sanitizeName(ARGS.channel || process.env.CLAUDE_COMM_CHANNEL || CRED.channel || 'default');
 const NAME_PROVIDED = !!(ARGS.name || process.env.CLAUDE_COMM_NAME);
 const NAME = sanitizeName(
   ARGS.name || process.env.CLAUDE_COMM_NAME || `claude-${crypto.randomBytes(2).toString('hex')}`
 );
 const ROLE = ARGS.role || process.env.CLAUDE_COMM_ROLE || '';
-const RELAY_URL = String(ARGS.relay || process.env.CLAUDE_COMM_RELAY || '').replace(/\/+$/, '');
-const TOKEN = ARGS.token || process.env.CLAUDE_COMM_TOKEN || '';
+const RELAY_URL = String(ARGS.relay || process.env.CLAUDE_COMM_RELAY || CRED.relay || '').replace(/\/+$/, '');
+const TOKEN = ARGS.token || process.env.CLAUDE_COMM_TOKEN || CRED.token || '';
 const MODE = RELAY_URL ? 'relay' : 'file';
 const CWD = process.cwd();
 const HOSTNAME = os.hostname();
@@ -1406,6 +1414,44 @@ const CLI_COMMANDS = {
       }
       console.log(`✅ Réponse à ${r.question.id} diffusée à toutes les sessions.`);
     });
+  },
+
+  async login() {
+    const url = String(ARGS._[1] || '').replace(/\/+$/, '');
+    const token = ARGS._[2];
+    const channel = ARGS._[3];
+    if (!url || !token) {
+      console.error('Usage : node server.js login <url-du-relais> <jeton> [canal]');
+      console.error('Mémorise la connexion : ensuite, toute session lancée sur cette machine');
+      console.error('utilise ce relais sans aucune variable d\'environnement.');
+      process.exit(1);
+    }
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 10000);
+    try {
+      const r = await fetch(`${url}/channels`, {
+        headers: { authorization: `Bearer ${token}`, 'bypass-tunnel-reminder': '1' },
+        signal: ctl.signal,
+      });
+      if (r.status === 401) throw new Error('jeton refusé par le relais.');
+      if (!r.ok) throw new Error(`le relais répond HTTP ${r.status}.`);
+    } catch (e) {
+      console.error(`❌ Vérification impossible : ${e.message}`);
+      process.exit(1);
+    } finally { clearTimeout(t); }
+    ensureDir(path.dirname(CREDENTIALS_FILE));
+    fs.writeFileSync(CREDENTIALS_FILE,
+      JSON.stringify({ relay: url, token, ...(channel ? { channel: sanitizeName(channel) } : {}) }, null, 2),
+      { mode: 0o600 });
+    console.log(`✅ Connexion mémorisée dans ${CREDENTIALS_FILE} (relais ${url}${channel ? `, canal ${channel}` : ''}).`);
+    console.log('Désormais sur cette machine : lance simplement `claude` (avec le serveur MCP comm');
+    console.log('déclaré), ou les commandes CLI sans export. Pour des outils comm_* dans TOUS les');
+    console.log(`projets sans .mcp.json : claude mcp add comm --scope user -- node ${path.join(__dirname, 'server.js')}`);
+  },
+
+  async logout() {
+    try { fs.unlinkSync(CREDENTIALS_FILE); console.log('✅ Identifiants supprimés.'); }
+    catch { console.log('Aucun identifiant mémorisé.'); }
   },
 
   async standup() {

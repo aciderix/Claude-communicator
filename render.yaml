@@ -1,0 +1,22 @@
+# Déploiement 1-clic du relais claude-comm sur Render :
+# https://render.com/deploy?repo=https://github.com/aciderix/claude-communicator
+#
+# Plan free : URL HTTPS stable, secret généré automatiquement, mais état
+# en mémoire (perdu quand l'instance s'endort) — suffisant pour coordonner
+# des sessions actives. Pour un état persistant, passez au plan starter et
+# décommentez le disque + ajoutez --data /var/data à startCommand.
+services:
+  - type: web
+    name: claude-comm-relay
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: node relay.js --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: CLAUDE_COMM_RELAY_SECRET
+        generateValue: true
+    # disk:
+    #   name: claude-comm-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

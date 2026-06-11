@@ -15,7 +15,7 @@ const PORT = 20000 + Math.floor(Math.random() * 20000);
 const RELAY_URL = `http://127.0.0.1:${PORT}`;
 
 class Client {
-  constructor(name, token = SECRET) {
+  constructor(name, token = SECRET, extraEnv = null) {
     this.name = name;
     this.nextId = 1;
     this.pending = new Map();
@@ -24,6 +24,7 @@ class Client {
         ...process.env,
         CLAUDE_COMM_NAME: name, CLAUDE_COMM_CHANNEL: 'relay-test',
         CLAUDE_COMM_RELAY: RELAY_URL, CLAUDE_COMM_TOKEN: token,
+        ...(extraEnv || {}),
       },
       stdio: ['pipe', 'pipe', 'inherit'],
     });
@@ -218,6 +219,30 @@ function ok(cond, label) {
     });
     const st3 = await (await fetch(`${RELAY_URL}/c/relay-test/state`, { headers: H })).json();
     ok(st3.config.standup_minutes === 30, 'config standup persistée côté relais');
+
+    console.log('identifiants mémorisés (login / credentials.json)');
+    const fs = require('fs');
+    const os = require('os');
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-home-'));
+    let badLogin = false;
+    try {
+      execFileSync(process.execPath, [path.join(ROOT, 'server.js'), 'login', RELAY_URL, 'mauvais-jeton'], {
+        env: { ...process.env, HOME: fakeHome }, encoding: 'utf8', stdio: 'pipe',
+      });
+    } catch { badLogin = true; }
+    ok(badLogin, 'login refuse un jeton invalide');
+    const loginOut = execFileSync(process.execPath, [path.join(ROOT, 'server.js'), 'login', RELAY_URL, SECRET, 'relay-test'], {
+      env: { ...process.env, HOME: fakeHome }, encoding: 'utf8',
+    });
+    ok(loginOut.includes('mémorisée'), 'login vérifie le relais et mémorise la connexion');
+    const carol = new Client('carol', '', {
+      HOME: fakeHome, CLAUDE_COMM_RELAY: '', CLAUDE_COMM_TOKEN: '', CLAUDE_COMM_CHANNEL: '',
+    });
+    try {
+      await carol.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });
+      const carolPeers = await carol.call('comm_peers', {});
+      ok(carolPeers.text.includes('alice'), 'session sans aucune variable d\'env connectée via credentials.json');
+    } finally { carol.close(); }
 
     console.log('client avec mauvais jeton');
     mallory = new Client('mallory', 'jeton-invalide');
