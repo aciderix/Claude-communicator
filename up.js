@@ -125,6 +125,31 @@ function writeHooks() {
 // --- 6. tunnel public optionnel ----------------------------------------------
 
 async function startTunnel(kind) {
+  if (kind === 'pinggy') {
+    // Tunnel SSH sur le port 443 (Termux : pkg install openssh).
+    // Gratuit sans compte ; sessions limitées à ~60 min, relancer au besoin.
+    try { execFileSync('ssh', ['-V'], { stdio: 'ignore' }); }
+    catch { console.error('⚠️  ssh introuvable (Termux : pkg install openssh). Tunnel ignoré.'); return null; }
+    const child = spawn('ssh', ['-p', '443',
+      '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes',
+      `-R0:127.0.0.1:${PORT}`, 'qr@free.pinggy.io'],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+    children.push(child);
+    const url = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), 25000);
+      let buf = '';
+      const scan = (d) => {
+        buf += d;
+        const m = buf.match(/https:\/\/[a-z0-9.-]+\.pinggy\.link/i);
+        if (m) { clearTimeout(timer); resolve(m[0]); }
+      };
+      child.stdout.on('data', scan);
+      child.stderr.on('data', scan);
+    });
+    if (url) console.error('ℹ️  Tunnel pinggy gratuit : ~60 min par session, relance up.js si l\'URL expire.');
+    return url;
+  }
   if (kind === 'ngrok') {
     try { execFileSync('ngrok', ['version'], { stdio: 'ignore' }); }
     catch { console.error('⚠️  ngrok introuvable dans le PATH (et il faut NGROK_AUTHTOKEN). Tunnel ignoré.'); return null; }
@@ -144,8 +169,10 @@ async function startTunnel(kind) {
   catch {
     bin = path.join(HOME_DIR, 'bin', 'cloudflared');
     if (!fs.existsSync(bin)) {
-      if (process.platform !== 'linux') {
-        console.error('⚠️  cloudflared introuvable. Installe-le (brew install cloudflared / https://github.com/cloudflare/cloudflared/releases) et relance. Tunnel ignoré.');
+      // Termux/Android : process.platform === 'android', le binaire linux statique fonctionne.
+      const linuxLike = process.platform === 'linux' || process.platform === 'android';
+      if (!linuxLike) {
+        console.error('⚠️  cloudflared introuvable. Installe-le (brew install cloudflared / https://github.com/cloudflare/cloudflared/releases) et relance, ou utilise --tunnel pinggy. Tunnel ignoré.');
         return null;
       }
       console.error('⬇️  Téléchargement de cloudflared…');
@@ -214,11 +241,18 @@ async function probeExisting() {
 
   if (reused) {
     console.error(`♻️  Un relais claude-comm tourne déjà sur le port ${PORT} avec ce secret — je le réutilise.`);
+    let code = null;
     try {
       const d = await (await fetch(`http://127.0.0.1:${PORT}/pair-code`,
         { headers: { authorization: `Bearer ${SECRET}` }, signal: AbortSignal.timeout(1500) })).json();
-      if (d.code) console.error(`📱 Code d'appairage dashboard : ${d.code}`);
+      code = d.code || null;
     } catch { /* ancienne version sans /pair-code */ }
+    if (code) console.error(`📱 Code d'appairage dashboard : ${code}`);
+    else {
+      console.error(`ℹ️  Code d'appairage indisponible (relais d'une version précédente) :`);
+      console.error(`    utilise le jeton complet dans le dashboard, ou redémarre proprement :`);
+      console.error(`    pkill -f relay.js  puis relance up.js`);
+    }
   } else {
     const relay = spawn(process.execPath, [
       path.join(ROOT, 'relay.js'),
