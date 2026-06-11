@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-comm — dashboard</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e;
+    --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+    padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:5; }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  header input, header button, select, textarea, .panel input, .panel button {
+    background:#0d1117; color:var(--fg); border:1px solid var(--border);
+    border-radius:6px; padding:5px 9px; font:inherit; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:#1f6feb; border-color:#1f6feb; }
+  #status { margin-left:auto; color:var(--dim); font-size:12px; }
+  #status.ok { color:var(--ok); }
+  #status.err { color:var(--bad); }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:14px 16px;
+    max-width:1500px; margin:0 auto; }
+  @media (max-width:1000px){ main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; padding:12px 14px; min-width:0; }
+  .panel h2 { font-size:13px; margin:0 0 10px; color:var(--accent);
+    text-transform:uppercase; letter-spacing:.5px; }
+  .panel.wide { grid-column:1 / -1; }
+  .card { border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .dim { color:var(--dim); font-size:12px; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px;
+    border:1px solid var(--border); }
+  .b-working{ color:var(--ok); border-color:var(--ok); }
+  .b-idle{ color:var(--dim); }
+  .b-blocked,.b-offline{ color:var(--bad); border-color:var(--bad); }
+  .b-done,.b-reviewing{ color:var(--purple); border-color:var(--purple); }
+  .b-silent{ color:var(--warn); border-color:var(--warn); }
+  .b-compact{ color:var(--warn); border-color:var(--warn); }
+  pre { white-space:pre-wrap; word-break:break-word; margin:6px 0;
+    background:#0d1117; border:1px solid var(--border); border-radius:6px;
+    padding:8px; max-height:420px; overflow:auto; font-size:12px; }
+  .msg-user { border-left:3px solid var(--accent); }
+  .msg-reply { border-left:3px solid var(--ok); margin-left:18px; }
+  .q-open { border-left:3px solid var(--warn); }
+  .q-answered { border-left:3px solid var(--ok); }
+  .task-done { opacity:.55; }
+  ul { margin:4px 0; padding-left:18px; }
+  #composer { display:flex; gap:8px; margin-top:10px; }
+  #composer textarea { flex:1; min-height:54px; resize:vertical; }
+  dialog { background:var(--panel); color:var(--fg); border:1px solid var(--border);
+    border-radius:8px; max-width:900px; width:90%; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  #login { max-width:460px; margin:60px auto; }
+  #login label { display:block; margin:10px 0 4px; color:var(--dim); }
+  #login input { width:100%; }
+  .hidden { display:none !important; }
+  progress { width:100%; height:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰 claude-comm</h1>
+  <span id="hdr-controls" class="hidden">
+    <input id="channel" size="10" title="canal">
+    <button onclick="reconnect()">changer</button>
+    <span class="dim">standup</span>
+    <input id="standup" size="3" title="minutes (0 = off)">
+    <button onclick="saveStandup()">min</button>
+  </span>
+  <span id="status">déconnecté</span>
+</header>
+
+<div id="login" class="panel">
+  <h2>Connexion</h2>
+  <label>URL du relais (laisser vide si ce dashboard est servi par le relais)</label>
+  <input id="in-url" placeholder="https://relay.exemple.com:8787">
+  <label>Jeton (secret du relais)</label>
+  <input id="in-token" type="password">
+  <label>Canal</label>
+  <input id="in-channel" value="default">
+  <p><button class="primary" onclick="login()">Se connecter</button></p>
+  <p class="dim">Le jeton reste dans ce navigateur (localStorage) et n'est envoyé qu'au relais.</p>
+</div>
+
+<main id="main" class="hidden">
+  <section class="panel wide">
+    <h2>👥 Sessions</h2>
+    <div id="sessions"></div>
+  </section>
+
+  <section class="panel">
+    <h2>🗺 Feuille de route</h2>
+    <div id="plan"></div>
+  </section>
+
+  <section class="panel">
+    <h2>📋 Tâches</h2>
+    <div id="tasks"></div>
+  </section>
+
+  <section class="panel wide">
+    <h2>💬 Conversation avec les sessions</h2>
+    <div id="thread"></div>
+    <div id="composer">
+      <select id="target"><option value="*">À toutes</option></select>
+      <textarea id="msg" placeholder="Message aux sessions Claude… (la première à répondre prend un claim, l'autre est prévenue pour ne pas gaspiller de tokens)"></textarea>
+      <button class="primary" onclick="sendMsg()">Envoyer</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>❔ Questions des IA</h2>
+    <div id="questions"></div>
+  </section>
+
+  <section class="panel">
+    <h2>🔍 Revues &nbsp;·&nbsp; 🔒 Verrous &nbsp;·&nbsp; 📓 Notes</h2>
+    <div id="reviews"></div>
+    <div id="locks"></div>
+    <div id="notes"></div>
+  </section>
+</main>
+
+<dialog id="diff-dialog">
+  <div class="row" style="justify-content:space-between">
+    <strong id="diff-title"></strong>
+    <span>
+      <button onclick="loadDiff(currentDiffPeer,'stat')">stat</button>
+      <button onclick="loadDiff(currentDiffPeer,'full')">complet</button>
+      <button onclick="document.getElementById('diff-dialog').close()">fermer</button>
+    </span>
+  </div>
+  <pre id="diff-body">…</pre>
+</dialog>
+
+<script>
+'use strict';
+let BASE = localStorage.getItem('cc_url') || '';
+let TOKEN = localStorage.getItem('cc_token') || '';
+let CHANNEL = localStorage.getItem('cc_channel') || 'default';
+let version = 0, running = false, currentDiffPeer = '';
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const ago = (iso) => {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso || 0)) / 1000));
+  if (!isFinite(s)) return '?';
+  if (s < 60) return `il y a ${s}s`;
+  if (s < 3600) return `il y a ${Math.round(s / 60)}min`;
+  return `il y a ${(s / 3600).toFixed(1)}h`;
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function api(path, opts = {}, timeoutMs = 35000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(`${BASE}/c/${encodeURIComponent(CHANNEL)}${path}`, {
+      ...opts, signal: ctl.signal,
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  } finally { clearTimeout(t); }
+}
+
+function setStatus(text, cls) {
+  const el = $('status');
+  el.textContent = text;
+  el.className = cls || '';
+}
+
+function login() {
+  BASE = $('in-url').value.trim().replace(/\/+$/, '');
+  TOKEN = $('in-token').value.trim();
+  CHANNEL = $('in-channel').value.trim() || 'default';
+  localStorage.setItem('cc_url', BASE);
+  localStorage.setItem('cc_token', TOKEN);
+  localStorage.setItem('cc_channel', CHANNEL);
+  start();
+}
+
+function reconnect() {
+  CHANNEL = $('channel').value.trim() || 'default';
+  localStorage.setItem('cc_channel', CHANNEL);
+  version = 0;
+}
+
+async function start() {
+  if (!TOKEN) return;
+  $('login').classList.add('hidden');
+  $('main').classList.remove('hidden');
+  $('hdr-controls').classList.remove('hidden');
+  $('channel').value = CHANNEL;
+  if (running) return;
+  running = true;
+  while (running) {
+    try {
+      const s = await api(`/state?version=${version}&wait=25`);
+      version = s.version;
+      render(s);
+      setStatus(`canal "${CHANNEL}" · v${s.version} · ${new Date().toLocaleTimeString()}`, 'ok');
+    } catch (e) {
+      setStatus(`erreur : ${e.message} — reconnexion…`, 'err');
+      if (String(e.message).includes('401')) { running = false; logout(); return; }
+      await sleep(3000);
+    }
+  }
+}
+
+function logout() {
+  $('login').classList.remove('hidden');
+  $('main').classList.add('hidden');
+  $('hdr-controls').classList.add('hidden');
+}
+
+function sessionBadges(s) {
+  const out = [`<span class="badge b-${esc(s.state || 'idle')}">${esc(s.state || 'idle')}</span>`];
+  const modelMs = s.last_model_seen ? Date.now() - Date.parse(s.last_model_seen) : null;
+  if (s.live && modelMs !== null && modelMs > 10 * 60 * 1000 && !['done', 'offline'].includes(s.state)) {
+    out.push(`<span class="badge b-silent" title="serveur connecté mais modèle inactif : limite d'usage 5 h/hebdo ? en attente d'input ?">🟡 modèle silencieux ${esc(ago(s.last_model_seen))}</span>`);
+  }
+  if (s.compacting) out.push('<span class="badge b-compact">♻️ compaction en cours</span>');
+  else if (s.compacted_at && Date.now() - Date.parse(s.compacted_at) < 30 * 60 * 1000) {
+    out.push(`<span class="badge b-compact">♻️ compacté ${esc(ago(s.compacted_at))}</span>`);
+  }
+  return out.join(' ');
+}
+
+function render(s) {
+  // sessions
+  $('sessions').innerHTML = (s.sessions || []).map((x) => `
+    <div class="card">
+      <div class="row">
+        <strong>${x.live ? '🟢' : '⚪'} ${esc(x.name)}</strong>
+        <span class="dim">${esc(x.role || '')}</span>
+        ${sessionBadges(x)}
+        <span class="dim">${esc(x.host || '')} · ${esc(x.branch || '?')}@${esc(x.head || '?')} · vu ${esc(ago(x.last_seen))}</span>
+        <button onclick="openDiff('${esc(x.name)}')">voir diff</button>
+      </div>
+      ${x.task ? `<div>↳ ${esc(x.task)} ${x.progress ? `<span class="dim">(${esc(x.progress)})</span>` : ''}</div>` : ''}
+      ${x.detail ? `<div class="dim">${esc(x.detail)}</div>` : ''}
+    </div>`).join('') || '<span class="dim">aucune session connectée</span>';
+
+  // cible du composer
+  const target = $('target');
+  const prev = target.value;
+  target.innerHTML = '<option value="*">À toutes</option>' +
+    (s.sessions || []).map((x) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join('');
+  if ([...target.options].some((o) => o.value === prev)) target.value = prev;
+
+  // plan
+  const tasks = s.tasks.tasks || [];
+  const planIcon = { todo:'⬜', active:'🔵', done:'✅', dropped:'🚫' };
+  $('plan').innerHTML =
+    `<div class="card">🎯 ${esc(s.plan.goal || '(cap non défini)')}</div>` +
+    ((s.plan.milestones || []).map((m) => {
+      const lk = tasks.filter((t) => t.milestone === m.id);
+      const dd = lk.filter((t) => t.status === 'done').length;
+      return `<div class="card ${m.status === 'done' ? 'task-done' : ''}">
+        ${planIcon[m.status] || '⬜'} <strong>${esc(m.id)}</strong> ${esc(m.title)}
+        ${lk.length ? `<progress max="${lk.length}" value="${dd}"></progress><span class="dim">${dd}/${lk.length} tâches</span>` : `<span class="dim">[${esc(m.status)}]</span>`}
+        ${m.detail ? `<div class="dim">${esc(m.detail)}</div>` : ''}
+      </div>`;
+    }).join('') || '<span class="dim">aucun jalon</span>');
+
+  // tâches
+  const taskIcon = { todo:'⬜', in_progress:'🔵', done:'✅', blocked:'🟥' };
+  $('tasks').innerHTML = tasks.map((t) => `
+    <div class="card ${t.status === 'done' ? 'task-done' : ''}">
+      ${taskIcon[t.status] || '⬜'} <strong>${esc(t.id)}</strong>
+      ${t.milestone ? `<span class="badge">${esc(t.milestone)}</span>` : ''}
+      ${esc(t.title)}
+      ${t.owner ? `<span class="badge b-working">${esc(t.owner)}</span>` : ''}
+      ${(t.deps || []).length ? `<span class="dim">⛓ ${esc(t.deps.join(', '))}</span>` : ''}
+      ${(t.notes || []).length ? `<div class="dim">· ${esc(t.notes[t.notes.length - 1])}</div>` : ''}
+    </div>`).join('') || '<span class="dim">aucune tâche</span>';
+
+  // conversation utilisateur ↔ sessions
+  $('thread').innerHTML = ((s.user && s.user.msgs.items) || []).map((m) => `
+    <div class="card msg-user">
+      <span class="dim">${esc(m.id)} → ${esc(m.to)} · ${esc(ago(m.ts))}
+        ${m.status === 'claimed' ? ` · ✍️ ${esc(m.claimed_by)} rédige…` : ''}</span>
+      <div>${esc(m.body)}</div>
+    </div>` +
+    (m.replies || []).map((r) => `
+    <div class="card msg-reply">
+      <span class="dim">${esc(r.by)} · ${esc(ago(r.ts))}</span>
+      <div>${esc(r.body)}</div>
+    </div>`).join('')).join('') || '<span class="dim">aucun échange — écris aux sessions ci-dessous</span>';
+
+  // questions des IA
+  $('questions').innerHTML = ((s.user && s.user.questions.items) || []).slice().reverse().map((q) => {
+    if (q.status === 'open') {
+      const opts = (q.options || []).map((o) =>
+        `<button onclick="answerQ('${esc(q.id)}', this.dataset.v)" data-v="${esc(o)}">${esc(o)}</button>`).join(' ');
+      return `<div class="card q-open">
+        <span class="dim">${esc(q.id)} de ${esc(q.from)} · ${esc(ago(q.ts))}</span>
+        <div><strong>${esc(q.text)}</strong></div>
+        ${q.context ? `<div class="dim">${esc(q.context)}</div>` : ''}
+        <div class="row" style="margin-top:6px">${opts}
+          <input id="qa-${esc(q.id)}" placeholder="réponse libre…" style="flex:1">
+          <button class="primary" onclick="answerQ('${esc(q.id)}', document.getElementById('qa-${esc(q.id)}').value)">Répondre</button>
+        </div>
+      </div>`;
+    }
+    return `<div class="card q-answered">
+      <span class="dim">${esc(q.id)} de ${esc(q.from)} · répondu ${esc(ago(q.answered_at))}</span>
+      <div>${esc(q.text)}</div>
+      <div>→ <strong>${esc(q.answer)}</strong></div>
+    </div>`;
+  }).join('') || '<span class="dim">aucune question des sessions</span>';
+
+  // revues / verrous / notes
+  const rIcon = { pending:'🟡', approved:'✅', changes_requested:'🟠', closed:'⚪' };
+  $('reviews').innerHTML = ((s.reviews.items || []).slice(-6).map((r) =>
+    `<div class="card">${rIcon[r.status] || ''} <strong>${esc(r.id)}</strong> ${esc(r.title || '')}
+     <span class="dim">${esc(r.from)} → ${esc(r.to)} · ${esc(r.status)}</span></div>`).join('')) ||
+    '<span class="dim">aucune revue</span>';
+  $('locks').innerHTML = ((s.locks || []).map((l) =>
+    `<div class="card">🔒 ${esc(l.path)} <span class="dim">→ ${esc(l.owner)}${l.reason ? ` — ${esc(l.reason)}` : ''}</span></div>`).join(''));
+  $('notes').innerHTML = ((s.notes_tail || []).slice(-6).map((n) =>
+    `<div class="card">📓 <span class="dim">[${esc(n.by)}]</span> ${esc(n.text)}</div>`).join(''));
+
+  // config standup
+  if (document.activeElement !== $('standup')) {
+    $('standup').value = (s.config && s.config.standup_minutes) || 0;
+  }
+}
+
+async function sendMsg() {
+  const body = $('msg').value.trim();
+  if (!body) return;
+  try {
+    await api('/user-post', { method: 'POST', body: JSON.stringify({ to: $('target').value, body }) });
+    $('msg').value = '';
+  } catch (e) { setStatus(`envoi : ${e.message}`, 'err'); }
+}
+
+async function answerQ(id, answer) {
+  answer = String(answer || '').trim();
+  if (!answer) return;
+  try {
+    await api('/user-answer', { method: 'POST', body: JSON.stringify({ id, answer }) });
+  } catch (e) { setStatus(`réponse : ${e.message}`, 'err'); }
+}
+
+async function saveStandup() {
+  try {
+    await api('/config', { method: 'POST', body: JSON.stringify({ standup_minutes: Number($('standup').value) || 0 }) });
+    setStatus('standup mis à jour', 'ok');
+  } catch (e) { setStatus(`config : ${e.message}`, 'err'); }
+}
+
+function openDiff(peer) { currentDiffPeer = peer; $('diff-dialog').showModal(); loadDiff(peer, 'stat'); }
+
+async function loadDiff(peer, mode) {
+  $('diff-title').textContent = `diff de ${peer} (${mode})`;
+  $('diff-body').textContent = 'chargement…';
+  try {
+    const r = await api(`/service/${encodeURIComponent(peer)}`,
+      { method: 'POST', body: JSON.stringify({ from: 'user', action: 'diff', params: { mode } }) }, 45000);
+    $('diff-body').textContent = r.ok ? r.result : `❌ ${r.error || 'pas de réponse'}`;
+  } catch (e) { $('diff-body').textContent = `❌ ${e.message}`; }
+}
+
+$('msg')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMsg();
+});
+
+if (TOKEN) { $('in-token').value = TOKEN; $('in-url').value = BASE; $('in-channel').value = CHANNEL; start(); }
+</script>
+</body>
+</html>

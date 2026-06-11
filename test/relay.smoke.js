@@ -155,6 +155,49 @@ function ok(cond, label) {
     const ov = await bob.call('comm_overview', {});
     ok(ov.text.includes('API v2') && ov.text.includes('Sessions'), 'overview agrégé via le relais');
 
+    console.log('dashboard web');
+    const dashHtml = await (await fetch(`${RELAY_URL}/`)).text();
+    ok(dashHtml.includes('claude-comm') && dashHtml.includes('dashboard'), 'dashboard HTML servi sans jeton (données protégées)');
+    const H = { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' };
+    const chans = await (await fetch(`${RELAY_URL}/channels`, { headers: H })).json();
+    ok(chans.channels.includes('relay-test'), 'liste des canaux accessible avec jeton');
+
+    console.log('messages utilisateur avec claim anti-gaspillage');
+    await alice.call('comm_inbox', {}); await bob.call('comm_inbox', {}); // purge
+    await fetch(`${RELAY_URL}/c/relay-test/user-post`, {
+      method: 'POST', headers: H, body: JSON.stringify({ to: '*', body: "Pouvez-vous résumer l'avancement ?" }),
+    });
+    const ub = await bob.call('comm_inbox', { wait_seconds: 5 }, 30000);
+    ok(ub.text.includes('claim id=U1'), 'message utilisateur broadcast reçu avec consigne de claim');
+    await alice.call('comm_inbox', {}); // alice reçoit U1 aussi, purge
+    const cl = await alice.call('comm_user', { action: 'claim', id: 'U1' });
+    ok(cl.text.includes('Claim obtenu'), 'alice obtient le claim');
+    const cl2 = await bob.call('comm_user', { action: 'claim', id: 'U1' });
+    ok(cl2.isError && cl2.text.includes('alice'), 'claim refusé à bob : réponse déjà en cours par alice');
+    const notifB = await bob.call('comm_inbox', {});
+    ok(notifB.text.includes('rédige la réponse'), 'bob est notifié que la réponse est en cours');
+    await alice.call('comm_user', { action: 'reply', id: 'U1', body: 'Avancement : M1 à 50 %, revue R1 approuvée.' });
+    const st2 = await (await fetch(`${RELAY_URL}/c/relay-test/state`, { headers: H })).json();
+    ok(st2.user.msgs.items[0].replies.length === 1 && st2.user.msgs.items[0].status === 'answered',
+      'réponse visible côté dashboard (historique persistant)');
+    const notifB2 = await bob.call('comm_inbox', {});
+    ok(notifB2.text.includes('M1 à 50'), 'bob voit la réponse publiée et peut intervenir si incorrecte');
+
+    console.log('question des IA → réponse utilisateur via dashboard');
+    await bob.call('comm_user', { action: 'ask', text: 'On merge sur main directement ?', options: ['Oui', 'Non, via PR'] });
+    await fetch(`${RELAY_URL}/c/relay-test/user-answer`, {
+      method: 'POST', headers: H, body: JSON.stringify({ id: 'Q1', answer: 'Non, via PR uniquement.' }),
+    });
+    const ansA = await alice.call('comm_inbox', { wait_seconds: 5 }, 30000);
+    ok(ansA.text.includes('via PR uniquement'), 'réponse utilisateur diffusée à toutes les sessions');
+
+    console.log('configuration standup');
+    await fetch(`${RELAY_URL}/c/relay-test/config`, {
+      method: 'POST', headers: H, body: JSON.stringify({ standup_minutes: 30 }),
+    });
+    const st3 = await (await fetch(`${RELAY_URL}/c/relay-test/state`, { headers: H })).json();
+    ok(st3.config.standup_minutes === 30, 'config standup persistée côté relais');
+
     console.log('client avec mauvais jeton');
     mallory = new Client('mallory', 'jeton-invalide');
     await mallory.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });

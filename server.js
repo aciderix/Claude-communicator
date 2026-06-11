@@ -28,8 +28,10 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const {
   sanitizeName, nowISO, newId, normalizePath, pathsOverlap,
-  emptyTasks, applyTaskAction, applyLockAction, applyNoteAction,
+  emptyTasks, applyTaskAction, applyLockAction, applyNoteAction, unmetDeps,
   emptyPlan, applyPlanAction, emptyReviews, applyReviewAction,
+  emptyUser, applyUserAction, userPost, userAnswer,
+  emptyConfig, standupDigest,
 } = require('./lib/shared');
 
 // ---------------------------------------------------------------------------
@@ -74,6 +76,8 @@ const LOCKS_FILE = path.join(CHAN_DIR, 'locks.json');
 const NOTES_FILE = path.join(CHAN_DIR, 'notes.json');
 const PLAN_FILE = path.join(CHAN_DIR, 'plan.json');
 const REVIEWS_FILE = path.join(CHAN_DIR, 'reviews.json');
+const USER_FILE = path.join(CHAN_DIR, 'user.json');
+const CONFIG_FILE = path.join(CHAN_DIR, 'config.json');
 const STATE_LOCK = path.join(CHAN_DIR, 'state.lock');
 
 const OFFLINE_AFTER_MS = 15 * 60 * 1000;
@@ -280,7 +284,7 @@ function fileReadInbox(consume) {
 }
 
 function stripVolatile(s) {
-  const { last_seen, live, ...rest } = s || {};
+  const { last_seen, live, last_model_seen, ...rest } = s || {};
   return rest;
 }
 
@@ -290,12 +294,38 @@ function fileSnapshot() {
   const locks = readJSON(LOCKS_FILE, []);
   const plan = readJSON(PLAN_FILE, emptyPlan());
   const reviews = readJSON(REVIEWS_FILE, emptyReviews());
-  const stable = JSON.stringify({ s: sessions.map(stripVolatile), t: tasks, l: locks, p: plan, r: reviews });
+  const user = readJSON(USER_FILE, emptyUser());
+  const stable = JSON.stringify({ s: sessions.map(stripVolatile), t: tasks, l: locks, p: plan, r: reviews, u: user });
   return {
     version: crypto.createHash('sha1').update(stable).digest('hex'),
-    sessions, tasks, locks, plan, reviews,
+    sessions, tasks, locks, plan, reviews, user,
     inbox_counts: Object.fromEntries(sessions.map((s) => [s.name, listDir(inboxNewDir(s.name)).length])),
   };
+}
+
+// Standup périodique en mode fichier : généré en s'adossant aux appels
+// d'outils (pas de démon), diffusé seulement si l'état a changé.
+async function maybeFileStandup() {
+  const cfg = readJSON(CONFIG_FILE, emptyConfig());
+  if (!cfg.standup_minutes) return;
+  if (Date.now() - (Date.parse(cfg.last_standup_at || 0) || 0) < cfg.standup_minutes * 60000) return;
+  await withStateLock(async () => {
+    const c = readJSON(CONFIG_FILE, emptyConfig());
+    if (Date.now() - (Date.parse(c.last_standup_at || 0) || 0) < c.standup_minutes * 60000) return;
+    c.last_standup_at = nowISO();
+    const digest = standupDigest(fileSnapshot());
+    const hash = crypto.createHash('sha1').update(digest).digest('hex');
+    if (hash !== c.last_standup_hash) {
+      c.last_standup_hash = hash;
+      for (const s of fileListSessions()) {
+        fileDeliver(s.name, {
+          id: newId(), from: 'standup', to: s.name, kind: 'notify',
+          subject: '🗞 standup périodique', body: digest, reply_to: null, ts: nowISO(),
+        });
+      }
+    }
+    writeJSONAtomic(CONFIG_FILE, c);
+  });
 }
 
 const fileApi = {
@@ -309,9 +339,11 @@ const fileApi = {
       ...prev, ...patch,
       name: NAME, pid: process.pid, cwd: CWD, host: HOSTNAME,
       branch: git.branch, head: git.head,
+      last_model_seen: nowISO(),
       last_seen: nowISO(), joined_at: prev.joined_at || nowISO(),
     };
     writeJSONAtomic(sessionFile(NAME), session);
+    try { await maybeFileStandup(); } catch { /* best effort */ }
     return session;
   },
 
@@ -401,6 +433,16 @@ const fileApi = {
     });
   },
 
+  async userOp(a) {
+    return withStateLock(async () => {
+      const user = readJSON(USER_FILE, emptyUser());
+      const op = applyUserAction(user, NAME, a);
+      if (op.changed) writeJSONAtomic(USER_FILE, user);
+      fileNotify(op);
+      return op.result;
+    });
+  },
+
   async snapshot() { return fileSnapshot(); },
 
   async waitChange(version, seconds) {
@@ -466,7 +508,7 @@ const relayApi = {
     const git = gitInfo();
     const data = await rfetch('POST', `/sessions/${NAME}`, {
       ...patch, cwd: CWD, host: HOSTNAME, pid: process.pid,
-      branch: git.branch, head: git.head,
+      branch: git.branch, head: git.head, last_model_seen: nowISO(),
       ...(patch.role === undefined && ROLE ? { role: ROLE } : {}),
     });
     return data.session;
@@ -501,6 +543,7 @@ const relayApi = {
   async noteOp(a) { return (await rfetch('POST', '/notes', { ...a, actor: NAME })).result; },
   async planOp(a) { return (await rfetch('POST', '/plan', { ...a, actor: NAME })).result; },
   async reviewOp(a) { return (await rfetch('POST', '/reviews', { ...a, actor: NAME })).result; },
+  async userOp(a) { return (await rfetch('POST', '/user-ops', { ...a, actor: NAME })).result; },
 
   async snapshot() { return rfetch('GET', '/state'); },
 
@@ -563,13 +606,33 @@ function isOnline(s) {
   return Date.now() - Date.parse(s.last_seen || 0) < OFFLINE_AFTER_MS;
 }
 
+const MODEL_SILENT_MS = 10 * 60 * 1000;
+
+function modelSilent(s) {
+  if (!isOnline(s) || ['done', 'offline'].includes(s.state)) return false;
+  const ms = s.last_model_seen ? Date.now() - Date.parse(s.last_model_seen) : null;
+  return ms !== null && ms > MODEL_SILENT_MS;
+}
+
 function describeSession(s, verbose = false) {
+  const silent = modelSilent(s);
+  const dot = !isOnline(s) ? '⚪' : silent ? '🟡' : '🟢';
   const lines = [
-    `${isOnline(s) ? '🟢' : '⚪'} ${s.name}${s.name === NAME ? ' (moi)' : ''}` +
+    `${dot} ${s.name}${s.name === NAME ? ' (moi)' : ''}` +
       `${s.role ? ` — ${s.role}` : ''} [${s.state || 'idle'}] (vu ${ago(s.last_seen)})`,
   ];
   if (s.task) lines.push(`   tâche : ${s.task}${s.progress ? ` (${s.progress})` : ''}`);
   if (s.detail) lines.push(`   détail : ${s.detail}`);
+  if (silent) {
+    lines.push(`   🟡 modèle inactif depuis ${ago(s.last_model_seen).replace('il y a ', '')} alors que sa session est connectée` +
+      ` — probablement hors d'usage (limite 5 h/hebdo atteinte ?) ou en attente d'input humain.` +
+      ` Ne compte pas sur une réponse rapide : avance sans lui ou réassigne ses tâches si ça dure.`);
+  }
+  if (s.compacting) {
+    lines.push('   ♻️ compaction de son contexte en cours — il risque de perdre des détails récents.');
+  } else if (s.compacted_at && Date.now() - Date.parse(s.compacted_at) < 30 * 60 * 1000) {
+    lines.push(`   ♻️ contexte compacté ${ago(s.compacted_at)} — re-précise-lui les points critiques si nécessaire.`);
+  }
   if (verbose) {
     lines.push(`   machine : ${s.host || '?'} | cwd : ${s.cwd}`);
     lines.push(`   branche : ${s.branch || '?'} @ ${s.head || '?'}`);
@@ -590,10 +653,14 @@ function formatMessage(m) {
   return `${head}\n${String(m.body).split('\n').map((l) => '   ' + l).join('\n')}`;
 }
 
-function formatTask(t) {
+function formatTask(t, db = null) {
   const icon = { todo: '⬜', in_progress: '🔵', done: '✅', blocked: '🟥' }[t.status] || '⬜';
   let line = `${icon} ${t.id}${t.milestone ? ` (${t.milestone})` : ''} [${t.status}] ${t.title}`;
   if (t.owner) line += ` — pris par ${t.owner}`;
+  if (t.deps && t.deps.length) {
+    const unmet = db ? unmetDeps(db, t) : [];
+    line += `\n     ⛓ dépend de : ${t.deps.map((d) => db ? `${d}${unmet.includes(d) ? '⏳' : '✓'}` : d).join(', ')}`;
+  }
   if (t.detail) line += `\n     ${t.detail}`;
   if (t.notes && t.notes.length) {
     line += '\n' + t.notes.slice(-3).map((n) => `     · ${n}`).join('\n');
@@ -603,11 +670,12 @@ function formatTask(t) {
 
 function formatBoard(tasks) {
   if (!tasks.length) return 'Tableau vide. Ajoute des tâches avec comm_task action=add.';
+  const db = { tasks };
   const open = tasks.filter((t) => t.status !== 'done');
   const done = tasks.filter((t) => t.status === 'done');
   let out = `📋 Tableau de tâches (canal "${CHANNEL}") :\n\n` +
-    (open.length ? open.map(formatTask).join('\n') : '(aucune tâche ouverte)');
-  if (done.length) out += `\n\nTerminées :\n${done.map(formatTask).join('\n')}`;
+    (open.length ? open.map((t) => formatTask(t, db)).join('\n') : '(aucune tâche ouverte)');
+  if (done.length) out += `\n\nTerminées :\n${done.map((t) => formatTask(t, db)).join('\n')}`;
   return out;
 }
 
@@ -791,6 +859,7 @@ const TOOLS = [
         title: { type: 'string', description: 'Titre (pour add)' },
         detail: { type: 'string', description: 'Description (pour add)' },
         milestone: { type: 'string', description: "Jalon de la feuille de route auquel rattacher la tâche (ex: 'M2', pour add)" },
+        deps: { type: 'array', items: { type: 'string' }, description: "Ids des tâches qui doivent être done avant celle-ci (ex: ['T2'], pour add). next/claim les respectent ; done signale les tâches débloquées" },
         to: { type: 'string', description: 'Pair à qui confier la tâche (pour assign)' },
         status: { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done'], description: 'Nouveau statut (pour update)' },
         note: { type: 'string', description: 'Note de progression ou résultat' },
@@ -828,6 +897,23 @@ const TOOLS = [
         id: { type: 'string', description: "Id de la revue (ex: 'R1') pour approve/changes/close" },
         title: { type: 'string', description: 'Objet de la revue (pour request)' },
         note: { type: 'string', description: 'Contexte, retours ou justification' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'comm_user',
+    description:
+      "Interactions avec l'utilisateur humain (via son dashboard/CLI). Quand un message utilisateur « à tous » arrive (sujet Ux) : fais action=claim AVANT de rédiger — si un pair a déjà le claim, n'écris RIEN (tu verras sa réponse et pourras la compléter seulement si elle est incorrecte : économie de tokens). action=reply publie ta réponse à l'utilisateur. action=ask lui pose une question (avec options éventuelles) — utile en cas de désaccord entre sessions sur un point clé ; sa réponse est diffusée à tous. action=list montre l'historique.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['claim', 'reply', 'ask', 'list'], description: 'Action à effectuer' },
+        id: { type: 'string', description: "Id du message utilisateur (ex: 'U2') pour claim/reply" },
+        body: { type: 'string', description: "Ta réponse à l'utilisateur (pour reply)" },
+        text: { type: 'string', description: 'La question à poser (pour ask)' },
+        options: { type: 'array', items: { type: 'string' }, description: 'Choix proposés en boutons dans le dashboard (pour ask, optionnel)' },
+        context: { type: 'string', description: 'Contexte court pour éclairer la décision (pour ask)' },
       },
       required: ['action'],
     },
@@ -997,7 +1083,9 @@ const HANDLERS = {
       case 'assigned':
         return `📌 ${r.task.id} assignée à ${r.to} (il sera notifié ; son prochain "next" la prendra en priorité) :\n${formatTask(r.task)}`;
       case 'done':
-        return `✅ ${r.task.id} terminée. ${r.remaining} tâche(s) restante(s).` +
+        return `✅ ${r.task.id} terminée.` +
+          (r.unblocked && r.unblocked.length ? ` ⛓ Débloquées : ${r.unblocked.join(', ')}.` : '') +
+          ` ${r.remaining} tâche(s) restante(s).` +
           (r.remaining ? ' Enchaîne avec comm_task action=next.' : ' 🎉 Tableau vide !');
       case 'released_task':
         return `↩️ ${r.task.id} rendue au tableau.`;
@@ -1085,6 +1173,36 @@ const HANDLERS = {
     return out;
   },
 
+  async comm_user(a) {
+    if (!a || !a.action) throw new Error('Paramètre requis : action.');
+    const r = await api.userOp(a);
+    switch (r.type) {
+      case 'claimed_msg':
+        return `✋ Claim obtenu sur ${r.msg.id} — les pairs sont prévenus de ne pas rédiger en parallèle.\n` +
+          `Message de l'utilisateur :\n${r.msg.body}\n\nPublie ta réponse avec comm_user action=reply id=${r.msg.id}.`;
+      case 'replied':
+        return `📤 Réponse à ${r.msg.id} publiée — l'utilisateur la voit dans son dashboard, les pairs sont notifiés (ils ne complèteront que si nécessaire).`;
+      case 'question':
+        return `❔ ${r.question.id} posée à l'utilisateur (visible dans son dashboard).\n` +
+          `Sa réponse te parviendra par message et sera diffusée à tous. En attendant : avance sur autre chose, ou comm_wait until=message si tu es bloqué dessus.`;
+      case 'user_list': {
+        const msgs = r.msgs.length
+          ? r.msgs.map((m) => {
+            let t = `📥 ${m.id} → ${m.to} [${m.status}${m.claimed_by ? ` par ${m.claimed_by}` : ''}] (${ago(m.ts)})\n   ${m.body}`;
+            for (const rep of m.replies || []) t += `\n   ↳ ${rep.by} : ${rep.body.slice(0, 500)}`;
+            return t;
+          }).join('\n')
+          : '(aucun message utilisateur)';
+        const qs = r.questions.length
+          ? r.questions.map((q) => `❔ ${q.id} [${q.status}] de ${q.from} : ${q.text}${q.answer ? `\n   → réponse : ${q.answer}` : ''}`).join('\n')
+          : '(aucune question)';
+        return `💬 Messages de l'utilisateur :\n${msgs}\n\n❔ Questions à l'utilisateur :\n${qs}`;
+      }
+      default:
+        return JSON.stringify(r);
+    }
+  },
+
   async comm_overview() {
     const snap = await api.snapshot();
     const notesR = await api.noteOp({ action: 'list', limit: 5 });
@@ -1097,6 +1215,14 @@ const HANDLERS = {
     parts.push(`## 📋 Tâches ouvertes (${openTasks.length})\n${openTasks.length ? openTasks.map(formatTask).join('\n') : '(aucune — comm_task action=add pour en créer)'}`);
     if (openReviews.length) {
       parts.push(`## 🔍 Revues en attente\n${openReviews.map(formatReview).join('\n')}`);
+    }
+    const openUserMsgs = ((snap.user && snap.user.msgs.items) || []).filter((m) => m.status !== 'answered');
+    const openQuestions = ((snap.user && snap.user.questions.items) || []).filter((q) => q.status === 'open');
+    if (openUserMsgs.length || openQuestions.length) {
+      parts.push(`## 💬 Utilisateur\n` +
+        openUserMsgs.map((m) => `- ${m.id} sans réponse${m.claimed_by ? ` (${m.claimed_by} rédige)` : ' — claim avant de répondre'} : ${m.body.slice(0, 200)}`).join('\n') +
+        (openUserMsgs.length && openQuestions.length ? '\n' : '') +
+        openQuestions.map((q) => `- ${q.id} posée par ${q.from}, en attente de réponse utilisateur : ${q.text.slice(0, 200)}`).join('\n'));
     }
     if (snap.locks.length) {
       parts.push(`## 🔒 Verrous\n${snap.locks.map((l) => `- ${l.path} → ${l.owner}${l.owner === NAME ? ' (moi)' : ''}${l.reason ? ` — ${l.reason}` : ''}`).join('\n')}`);
@@ -1233,6 +1359,63 @@ const CLI_COMMANDS = {
     const msgs = await api.inboxRead({ consume: true });
     console.log(msgs.length ? msgs.map(formatMessage).join('\n\n') : '📭 Boîte vide.');
   },
+
+  async questions() {
+    const snap = await api.snapshot();
+    const items = (snap.user && snap.user.questions.items) || [];
+    const open = items.filter((q) => q.status === 'open');
+    const answered = items.filter((q) => q.status === 'answered').slice(-5);
+    console.log(open.length
+      ? `❔ Questions en attente de TA réponse :\n` + open.map((q) =>
+        `- ${q.id} de ${q.from} (${ago(q.ts)}) : ${q.text}` +
+        (q.options.length ? `\n  options : ${q.options.join(' | ')}` : '') +
+        (q.context ? `\n  contexte : ${q.context}` : '') +
+        `\n  → node server.js answer ${q.id} "ta réponse"`).join('\n')
+      : 'Aucune question en attente.');
+    if (answered.length) {
+      console.log(`\nDéjà répondues :\n` + answered.map((q) => `- ${q.id} : ${q.text} → ${q.answer}`).join('\n'));
+    }
+  },
+
+  async answer() {
+    const id = ARGS._[1];
+    const answer = ARGS._.slice(2).join(' ');
+    if (!id || !answer) {
+      console.error('Usage : node server.js answer <Qx> <réponse...>');
+      process.exit(1);
+    }
+    if (MODE === 'relay') {
+      const r = await rfetch('POST', '/user-answer', { id, answer });
+      console.log(`✅ Réponse à ${r.question.id} diffusée à toutes les sessions.`);
+      return;
+    }
+    await withStateLock(async () => {
+      const user = readJSON(USER_FILE, emptyUser());
+      const r = userAnswer(user, { id, answer });
+      writeJSONAtomic(USER_FILE, user);
+      for (const s of fileListSessions()) {
+        fileDeliver(s.name, {
+          id: newId(), from: 'user', to: s.name, kind: 'notify',
+          subject: r.notify.subject, body: r.notify.body, reply_to: null, ts: nowISO(),
+        });
+      }
+      console.log(`✅ Réponse à ${r.question.id} diffusée à toutes les sessions.`);
+    });
+  },
+
+  async standup() {
+    const minutes = Math.max(0, Math.min(1440, Number(ARGS._[1]) || 0));
+    if (MODE === 'relay') {
+      await rfetch('POST', '/config', { standup_minutes: minutes });
+    } else {
+      const cfg = readJSON(CONFIG_FILE, emptyConfig());
+      cfg.standup_minutes = minutes;
+      writeJSONAtomic(CONFIG_FILE, cfg);
+    }
+    console.log(minutes
+      ? `🗞 Standup périodique activé : toutes les ${minutes} min (diffusé seulement si l'état a changé).`
+      : '🗞 Standup périodique désactivé.');
+  },
 };
 
 if (CLI_COMMANDS[ARGS._[0]]) {
@@ -1267,7 +1450,7 @@ function startMcp() {
         respond(id, {
           protocolVersion: (params && params.protocolVersion) || '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'claude-comm', version: '3.0.0' },
+          serverInfo: { name: 'claude-comm', version: '4.0.0' },
           instructions:
             `Tu es connecté au canal de coordination "${CHANNEL}" sous le nom "${NAME}"` +
             `${MODE === 'relay' ? ` via le relais ${RELAY_URL}` : ''}. ` +

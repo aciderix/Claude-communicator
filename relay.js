@@ -32,6 +32,8 @@ const {
   sanitizeName, nowISO, newId, emptyTasks,
   applyTaskAction, applyLockAction, applyNoteAction,
   emptyPlan, applyPlanAction, emptyReviews, applyReviewAction,
+  emptyUser, applyUserAction, userPost, userAnswer,
+  emptyConfig, standupDigest,
 } = require('./lib/shared');
 
 // ---------------------------------------------------------------------------
@@ -98,6 +100,8 @@ function newChannel(name) {
     notes: [],
     plan: emptyPlan(),
     reviews: emptyReviews(),
+    user: emptyUser(),
+    config: emptyConfig(),
     version: 1,
     waiters: [],         // long-polls en attente (état / inbox)
     servicePollers: new Map(),  // name -> {res, timer}
@@ -129,7 +133,8 @@ function persist(ch) {
       fs.writeFileSync(tmp, JSON.stringify({
         sessions: ch.sessions, inboxes: ch.inboxes,
         tasks: ch.tasks, locks: ch.locks, notes: ch.notes,
-        plan: ch.plan, reviews: ch.reviews, version: ch.version,
+        plan: ch.plan, reviews: ch.reviews,
+        user: ch.user, config: ch.config, version: ch.version,
       }));
       fs.renameSync(tmp, f);
     } catch (e) { console.error(`persistance ${ch.name}:`, e.message); }
@@ -149,7 +154,9 @@ function loadPersisted() {
         sessions: d.sessions || {}, inboxes: d.inboxes || {},
         tasks: d.tasks || emptyTasks(), locks: d.locks || [],
         notes: d.notes || [], plan: d.plan || emptyPlan(),
-        reviews: d.reviews || emptyReviews(), version: (d.version || 1) + 1,
+        reviews: d.reviews || emptyReviews(),
+        user: d.user || emptyUser(), config: d.config || emptyConfig(),
+        version: (d.version || 1) + 1,
       });
       channels.set(name, ch);
     } catch (e) { console.error(`chargement ${f}:`, e.message); }
@@ -276,6 +283,9 @@ function statePayload(ch) {
     locks: ch.locks,
     plan: ch.plan,
     reviews: ch.reviews,
+    user: ch.user,
+    config: { standup_minutes: ch.config.standup_minutes },
+    notes_tail: ch.notes.slice(-20),
     notes_count: ch.notes.length,
     inbox_counts: Object.fromEntries(Object.entries(ch.inboxes).map(([k, v]) => [k, v.length])),
   };
@@ -285,14 +295,28 @@ function statePayload(ch) {
 // Routage
 // ---------------------------------------------------------------------------
 
+let DASHBOARD_HTML = '';
+try {
+  DASHBOARD_HTML = fs.readFileSync(path.join(__dirname, 'public', 'dashboard.html'), 'utf8');
+} catch { /* dashboard absent : routes API seulement */ }
+
 async function handle(req, res) {
   const u = new URL(req.url, 'http://relay');
 
   if (req.method === 'GET' && u.pathname === '/healthz') {
     return json(res, 200, { ok: true });
   }
+  // Le HTML du dashboard est public (il ne contient aucune donnée) :
+  // le jeton est saisi dans l'interface et requis pour tous les appels API.
+  if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/dashboard') && DASHBOARD_HTML) {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(DASHBOARD_HTML);
+  }
   if (!tokenOk(req.headers.authorization)) {
     return json(res, 401, { error: 'Non autorisé : jeton Bearer manquant ou invalide.' });
+  }
+  if (req.method === 'GET' && u.pathname === '/channels') {
+    return json(res, 200, { channels: [...channels.keys()] });
   }
   const ip = req.socket.remoteAddress || '?';
   if (rateLimited(ip)) return json(res, 429, { error: 'Débit trop élevé, réessaie dans une minute.' });
@@ -316,7 +340,8 @@ async function handle(req, res) {
     }
     const prev = ch.sessions[name] || { joined_at: nowISO() };
     const patch = {};
-    for (const k of ['role', 'state', 'task', 'detail', 'progress', 'cwd', 'branch', 'head', 'host', 'pid']) {
+    for (const k of ['role', 'state', 'task', 'detail', 'progress', 'cwd', 'branch', 'head',
+      'host', 'pid', 'last_model_seen', 'compacting', 'compacted_at']) {
       if (body[k] !== undefined) patch[k] = typeof body[k] === 'string' ? body[k].slice(0, 2000) : body[k];
     }
     ch.sessions[name] = { ...prev, ...patch, name, last_seen: nowISO(), joined_at: prev.joined_at };
@@ -415,6 +440,35 @@ async function handle(req, res) {
     return json(res, 200, { result: op.result });
   }
 
+  // --- interactions utilisateur (sessions ← outil comm_user) --------------
+  if (req.method === 'POST' && rest[0] === 'user-ops') {
+    const actor = sanitizeName(body.actor);
+    const op = applyUserAction(ch.user, actor, body);
+    notifyFromOp(ch, actor, op);
+    if (op.changed) bump(ch);
+    return json(res, 200, { result: op.result });
+  }
+  // --- interactions utilisateur (dashboard / CLI → sessions) --------------
+  if (req.method === 'POST' && rest[0] === 'user-post') {
+    const { msg, deliveries } = userPost(ch.user, Object.keys(ch.sessions), body);
+    for (const d of deliveries) deliver(ch, d.to, d.message);
+    bump(ch);
+    return json(res, 200, { msg });
+  }
+  if (req.method === 'POST' && rest[0] === 'user-answer') {
+    const r = userAnswer(ch.user, body);
+    broadcast(ch, 'user', 'notify', r.notify.subject, r.notify.body);
+    bump(ch);
+    return json(res, 200, { question: r.question });
+  }
+  if (req.method === 'POST' && rest[0] === 'config') {
+    if (body.standup_minutes !== undefined) {
+      ch.config.standup_minutes = Math.max(0, Math.min(1440, Number(body.standup_minutes) || 0));
+    }
+    bump(ch);
+    return json(res, 200, { config: { standup_minutes: ch.config.standup_minutes } });
+  }
+
   // --- état global (long-poll pour comm_wait) ------------------------------
   if (req.method === 'GET' && rest[0] === 'state') {
     const clientV = Number(q.get('version')) || 0;
@@ -504,6 +558,30 @@ async function handle(req, res) {
 // ---------------------------------------------------------------------------
 
 loadPersisted();
+
+// Standup périodique optionnel : digest compact (généré sans LLM) diffusé
+// aux sessions seulement si l'état a changé depuis le précédent.
+function maybeStandup(ch) {
+  const minutes = ch.config.standup_minutes;
+  if (!minutes) return;
+  const last = Date.parse(ch.config.last_standup_at || 0) || 0;
+  if (Date.now() - last < minutes * 60000) return;
+  ch.config.last_standup_at = nowISO();
+  if (!Object.keys(ch.sessions).length) { persist(ch); return; }
+  const digest = standupDigest(statePayload(ch));
+  const hash = crypto.createHash('sha1').update(digest).digest('hex');
+  if (hash === ch.config.last_standup_hash) { persist(ch); return; }
+  ch.config.last_standup_hash = hash;
+  broadcast(ch, 'standup', 'notify', '🗞 standup périodique', digest);
+  bump(ch);
+}
+
+const standupTimer = setInterval(() => {
+  for (const ch of channels.values()) {
+    try { maybeStandup(ch); } catch (e) { console.error('standup:', e.message); }
+  }
+}, 60000);
+standupTimer.unref();
 
 const onRequest = (req, res) => {
   handle(req, res).catch((e) => json(res, e.status || 500, { error: e.message }));

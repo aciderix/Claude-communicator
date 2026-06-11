@@ -36,7 +36,12 @@ MCP **sans aucune dépendance** (Node ≥ 18).
 | **Lire un fichier du worktree de l'autre** (lecture seule) | `comm_file peer=bob path=src/api.ts` |
 | **Feuille de route partagée que tous complètent** (cap + jalons) | `comm_plan` |
 | Se répartir les tâches (claim atomique, rattachées aux jalons) | `comm_task action=next` |
+| **Dépendances entre tâches** (T4 attend que T2 soit done) | `comm_task add deps=["T2"]` |
 | Assigner une tâche à un pair (le lead bosse aussi) | `comm_task action=assign` |
+| **Répondre à l'utilisateur sans doublon** (claim anti-gaspillage) | `comm_user action=claim/reply` |
+| **Poser une question à l'utilisateur** (réponse diffusée à tous) | `comm_user action=ask` |
+| Savoir si le pair est **hors d'usage** (limite 5 h/hebdo) ou **compacté** | `comm_peers` + hooks |
+| **Standup périodique optionnel** (digest seulement si changement) | CLI `standup 30` / dashboard |
 | **Revue croisée avant merge** (diff joint automatiquement) | `comm_review` |
 | **Vue d'ensemble agrégée** (plan, sessions, tâches, revues...) | `comm_overview` |
 | Éviter d'éditer les mêmes fichiers | `comm_lock action=acquire` |
@@ -176,7 +181,73 @@ messages entrants sont injectés automatiquement dans son contexte. Dans
 ```
 
 Le hook fonctionne dans les deux modes (il utilise les mêmes variables
-d'environnement) et fait aussi office de heartbeat.
+d'environnement) et fait aussi office de heartbeat « modèle actif ».
+
+Branchez aussi `Stop`, `PreCompact`, `SessionStart` et `SessionEnd` sur le
+même script (l'exemple complet est dans
+[`examples/settings.hooks.json`](examples/settings.hooks.json)) pour
+activer la détection d'indisponibilité et de compaction décrite plus haut.
+
+## Dashboard web (mode relais)
+
+Le relais sert un dashboard sur `http(s)://<relais>/` : ouvrez-le dans un
+navigateur, saisissez le jeton (gardé en localStorage) et le canal.
+
+- **Suivi en direct** (long-poll) : sessions avec état/branche/machine,
+  badges « 🟡 modèle silencieux » et « ♻️ compacté », feuille de route avec
+  barres de progression, tâches (avec dépendances), revues, verrous, notes.
+- **Explorer le travail** : bouton « voir diff » par session (stat/complet),
+  répondu automatiquement par l'instance du pair.
+- **Converser avec les sessions** : envoi ciblé (une session) ou à toutes.
+  Pour un message « à tous », la première session qui répond pose un *claim*
+  visible dans le fil (« ✍️ alice rédige… ») ; l'autre est notifiée et ne
+  rédige pas en double — elle ne complète que si la réponse est incorrecte.
+- **Répondre aux questions des IA** : quand une session pose une question
+  (`comm_user action=ask`, p.ex. faute de consensus entre elles), elle
+  apparaît dans le dashboard avec ses options en boutons ; votre réponse est
+  diffusée à toutes les sessions.
+- **Historique persistant** : conversation et questions vivent côté relais
+  (et survivent aux redémarrages avec `--data`) — fermez le navigateur,
+  rouvrez, tout est là.
+- **Standup périodique** : réglable depuis l'en-tête (minutes, 0 = off).
+
+Astuce : même sur une seule machine, lancer le relais en local
+(`node relay.js`) donne accès au dashboard.
+
+## Disponibilité du pair : limite d'usage, compaction
+
+Avec les hooks branchés (voir plus bas), chaque session sait ce qui arrive
+à l'autre :
+
+- **Hors d'usage / silencieux** : le serveur distingue la vie du processus
+  (`last_seen`) de l'activité du modèle (`last_model_seen`, alimenté par les
+  appels d'outils et les hooks). Si la session est connectée mais que le
+  modèle n'a rien fait depuis 10 min, `comm_peers` et le dashboard
+  l'affichent 🟡 « modèle inactif — probablement hors d'usage (limite
+  5 h/hebdo) ou en attente d'input », avec la consigne d'avancer sans lui.
+- **Compaction** : le hook `PreCompact` prévient les pairs avant la
+  compaction ; `SessionStart(source=compact)` la signale après coup ET
+  réinjecte à la session compactée la consigne de se resynchroniser
+  (`comm_overview` + `comm_note list`). Badge ♻️ dans `comm_peers` et le
+  dashboard pendant 30 min.
+- **Départ** : `SessionEnd` marque la session offline et prévient les pairs
+  (« réassigne ses tâches si nécessaire »).
+
+## Économie de tokens
+
+L'outil est conçu pour coûter le moins possible en contexte :
+
+- **Claim de réponse utilisateur** : une seule session rédige, l'autre est
+  notifiée et ne dépense des tokens que si une correction s'impose.
+- **Standup uniquement sur changement** : le digest (généré sans LLM) n'est
+  envoyé que si l'état a évolué depuis le précédent ; désactivé par défaut.
+- **Long-poll partout** : `comm_inbox wait` et `comm_wait` dorment côté
+  serveur au lieu de boucler en appels d'outils.
+- **Diff/fichiers auto-répondus** : consulter le travail du pair ne consomme
+  aucun token chez lui.
+- **Tailles plafonnées** : messages, diffs (30 Ko), fichiers (100 Ko),
+  notes, et notifications compactes (sujets courts, corps tronqués).
+- `comm_overview` agrège tout en un appel au lieu de cinq.
 
 ## L'humain dans la boucle (CLI)
 
@@ -190,6 +261,9 @@ node server.js status            # feuille de route, sessions, tâches, revues, 
 CLAUDE_COMM_NAME=patron node server.js send "*" "Priorité au bugfix #42"
 CLAUDE_COMM_NAME=patron node server.js send alice "Où en es-tu ?"
 CLAUDE_COMM_NAME=patron node server.js inbox     # lire les réponses
+node server.js questions                          # questions posées par les IA
+node server.js answer Q1 "Non, via PR uniquement" # répondre (diffusé à tous)
+node server.js standup 30                         # standup périodique (0 = off)
 ```
 
 Les sessions Claude voient l'humain comme un pair et peuvent lui répondre
@@ -233,10 +307,15 @@ Les recettes complètes sont dans [`PROTOCOL.md`](PROTOCOL.md).
 - **`comm_plan`** — feuille de route partagée : cap (`goal`) + jalons
   (`add`/`update`/`done`/`list`), complétable par toutes les sessions,
   progression par jalon calculée depuis les tâches rattachées.
-- **`comm_task`** — tableau partagé : `add` (option `milestone`), `list`,
-  `next` (claim atomique, tâches assignées en priorité), `claim`, `assign`
-  (confier à un pair), `update`, `done`, `release`. Chaque changement
-  notifie les pairs.
+- **`comm_task`** — tableau partagé : `add` (options `milestone` et `deps` —
+  dépendances respectées par `next`/`claim`, tâches débloquées signalées au
+  `done`), `list`, `next` (claim atomique, tâches assignées en priorité),
+  `claim`, `assign` (confier à un pair), `update`, `done`, `release`.
+  Chaque changement notifie les pairs.
+- **`comm_user`** — interactions avec l'humain : `claim` (verrou de réponse
+  anti-gaspillage sur les messages « à tous »), `reply` (publier vers le
+  dashboard), `ask` (question à l'utilisateur, avec options ; réponse
+  diffusée à tous), `list`.
 - **`comm_review`** — revue croisée : `request` (diff stat joint
   automatiquement), `approve`/`changes` (réservés au relecteur désigné),
   `close` (réservé au demandeur), `list`.
@@ -261,5 +340,5 @@ Les recettes complètes sont dans [`PROTOCOL.md`](PROTOCOL.md).
 ## Tests
 
 ```bash
-npm test   # 41 assertions en mode fichier + 22 en mode relais
+npm test   # 59 assertions en mode fichier + 32 en mode relais
 ```

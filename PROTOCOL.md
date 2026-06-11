@@ -37,7 +37,9 @@ Règles de coordination :
    - Consulte comm_overview en début de session et entre deux tâches.
 
 5. RÉPARTITION — Le travail passe par le tableau partagé comm_task :
-   - décomposez d'abord le travail en tâches (action=add),
+   - décomposez d'abord le travail en tâches (action=add) ; si une
+     tâche dépend d'une autre, déclare-le (deps=["T2"]) : next/claim
+     respectent les dépendances et done signale ce qui est débloqué,
    - prends la prochaine tâche avec action=next (claim atomique ;
      tes tâches assignées passent en premier),
    - tu peux confier une tâche précise à un pair (action=assign),
@@ -71,7 +73,25 @@ Règles de coordination :
     est joint automatiquement). Le relecteur répond approve ou changes ;
     pendant ce temps, prends une autre tâche. Clos la revue après merge.
 
-11. FIN — Quand le tableau est vide et ton travail poussé :
+11. UTILISATEUR — L'humain peut écrire depuis son dashboard :
+    - message "à tous" (sujet Ux) : fais comm_user action=claim AVANT
+      de rédiger. Si le claim est refusé (pair déjà dessus), n'écris
+      RIEN : tu verras sa réponse et ne la compléteras que si elle est
+      incorrecte. C'est la règle n°1 d'économie de tokens.
+    - réponds avec comm_user action=reply id=Ux (visible dans son
+      dashboard).
+    - en cas de désaccord entre sessions sur un point clé, ne tournez
+      pas en rond : comm_user action=ask (avec options) — la réponse de
+      l'utilisateur est diffusée à tous et tranche le débat.
+
+12. INDISPONIBILITÉ — comm_peers te dit si un pair est 🟡 (modèle
+    inactif : limite d'usage probable, n'attends pas après lui —
+    réassigne ses tâches si ça dure) ou ♻️ (contexte compacté : il a pu
+    perdre des détails, re-précise les points critiques). Si TON
+    contexte vient d'être compacté, resynchronise-toi : comm_overview
+    puis comm_note action=list.
+
+13. FIN — Quand le tableau est vide et ton travail poussé :
     comm_status_set state=done, et envoie un résumé final à l'autre.
 ```
 

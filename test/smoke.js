@@ -67,7 +67,7 @@ function ok(cond, label) {
     ok(initA.result.serverInfo.name === 'claude-comm', 'initialize alice');
     await bob.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });
     const toolsList = await alice.rpc('tools/list', {});
-    ok(toolsList.result.tools.length === 15, 'tools/list expose 15 outils');
+    ok(toolsList.result.tools.length === 16, 'tools/list expose 16 outils');
 
     console.log('join & peers');
     await alice.call('comm_join', { role: 'backend', task: 'API' });
@@ -180,6 +180,18 @@ function ok(cond, label) {
     const closeR = await alice.call('comm_review', { action: 'close', id: 'R1' });
     ok(closeR.text.includes('closed'), 'alice clôt la revue après merge');
 
+    console.log('dépendances entre tâches');
+    const dep = await alice.call('comm_task', { action: 'add', title: 'Déploiement final', deps: ['T3'] });
+    ok(dep.text.includes('T4') && dep.text.includes('⛓'), 'T4 créée avec dépendance sur T3');
+    const claimDep = await alice.call('comm_task', { action: 'claim', id: 'T4' });
+    ok(claimDep.isError && claimDep.text.includes('Dépendances'), 'claim refusé tant que T3 pas done');
+    const nextDep = await alice.call('comm_task', { action: 'next' });
+    ok(!nextDep.text.includes('T4'), 'next ignore les tâches aux dépendances non résolues');
+    const doneT3 = await bob.call('comm_task', { action: 'done', id: 'T3' });
+    ok(doneT3.text.includes('Débloquées : T4'), 'done signale les tâches débloquées');
+    const claimDep2 = await alice.call('comm_task', { action: 'claim', id: 'T4' });
+    ok(!claimDep2.isError, 'T4 réclamable après résolution des dépendances');
+
     console.log("vue d'ensemble");
     const ov = await alice.call('comm_overview', {});
     ok(ov.text.includes('Feuille de route') && ov.text.includes('Sessions') && ov.text.includes('TypeScript'),
@@ -194,6 +206,25 @@ function ok(cond, label) {
     await alice.call('comm_send', { to: 'patron', body: 'bien reçu chef' });
     const outH = run(process.execPath, [SERVER, 'inbox'], { env: envH, encoding: 'utf8' });
     ok(outH.includes('bien reçu chef'), 'le CLI inbox lit les réponses des sessions');
+
+    console.log("questions des IA à l'utilisateur");
+    const q = await alice.call('comm_user', { action: 'ask', text: 'Postgres ou SQLite ?', options: ['Postgres', 'SQLite'] });
+    ok(q.text.includes('Q1'), 'question posée par alice');
+    const qNotif = await bob.call('comm_inbox', {});
+    ok(qNotif.text.includes('Postgres ou SQLite'), 'bob est informé de la question posée');
+    const qcli = run(process.execPath, [SERVER, 'questions'], { env: envH, encoding: 'utf8' });
+    ok(qcli.includes('Postgres ou SQLite'), 'le CLI questions liste la question en attente');
+    run(process.execPath, [SERVER, 'answer', 'Q1', 'Postgres'], { env: envH, encoding: 'utf8' });
+    const ansB = await bob.call('comm_inbox', {});
+    ok(ansB.text.includes('Postgres'), 'réponse utilisateur diffusée à toutes les sessions');
+    const ulist = await alice.call('comm_user', { action: 'list' });
+    ok(ulist.text.includes('Q1') && ulist.text.includes('Postgres'), 'comm_user list montre la question répondue');
+
+    console.log('standup périodique (configuration)');
+    const standupOut = run(process.execPath, [SERVER, 'standup', '30'], { env: envH, encoding: 'utf8' });
+    ok(standupOut.includes('30 min'), 'standup activé via CLI');
+    const standupOff = run(process.execPath, [SERVER, 'standup', '0'], { env: envH, encoding: 'utf8' });
+    ok(standupOff.includes('désactivé'), 'standup désactivé via CLI');
 
     console.log('notification de non-lus en pied de réponse');
     await alice.call('comm_send', { to: 'bob', body: 'pense à relire' });
@@ -214,6 +245,30 @@ function ok(cond, label) {
       input: '{}', encoding: 'utf8',
     });
     ok(hookEmpty.trim() === '', 'le hook est silencieux quand la boîte est vide');
+
+    console.log('détection de compaction et de fin de session');
+    const envBobHook = { ...process.env, CLAUDE_COMM_NAME: 'bob', CLAUDE_COMM_HUB: HUB, CLAUDE_COMM_CHANNEL: 'test' };
+    const HOOKJS = path.join(__dirname, '..', 'hooks', 'comm-hook.js');
+    run(process.execPath, [HOOKJS], {
+      env: envBobHook, input: JSON.stringify({ hook_event_name: 'PreCompact', trigger: 'auto' }), encoding: 'utf8',
+    });
+    const compNotif = await alice.call('comm_inbox', {});
+    ok(compNotif.text.includes('compaction'), 'PreCompact : le pair est prévenu');
+    const ssOut = run(process.execPath, [HOOKJS], {
+      env: envBobHook, input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'compact' }), encoding: 'utf8',
+    });
+    ok(ssOut.includes('Resynchronise'), 'SessionStart compact : consigne de resynchro injectée à la session');
+    const compNotif2 = await alice.call('comm_inbox', {});
+    ok(compNotif2.text.includes('compacté'), 'compaction signalée au pair');
+    const peersComp = await alice.call('comm_peers', {});
+    ok(peersComp.text.includes('compacté'), 'comm_peers affiche la compaction du pair');
+    run(process.execPath, [HOOKJS], {
+      env: envBobHook, input: JSON.stringify({ hook_event_name: 'SessionEnd', reason: 'logout' }), encoding: 'utf8',
+    });
+    const endNotif = await alice.call('comm_inbox', {});
+    ok(endNotif.text.includes('quitté'), 'SessionEnd : le pair sait que la session est partie');
+    const peersEnd = await alice.call('comm_peers', {});
+    ok(peersEnd.text.includes('[offline]'), 'comm_peers montre la session offline');
 
     console.log(`\n✅ ${passed} assertions OK`);
   } finally {

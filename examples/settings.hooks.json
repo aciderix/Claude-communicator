@@ -20,6 +20,46 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /chemin/vers/Claude-communicator/hooks/comm-hook.js"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /chemin/vers/Claude-communicator/hooks/comm-hook.js"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /chemin/vers/Claude-communicator/hooks/comm-hook.js"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /chemin/vers/Claude-communicator/hooks/comm-hook.js"
+          }
+        ]
+      }
     ]
   }
 }
