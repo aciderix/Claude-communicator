@@ -74,6 +74,11 @@ function lanIPs() {
 // --- 3. .mcp.json du projet (sans secret : committable) --------------------
 
 function writeMcpJson() {
+  if (!fs.existsSync(PROJECT)) {
+    console.error(`⚠️  Projet introuvable (${PROJECT}) — .mcp.json non écrit.`);
+    console.error('    Relance avec --project <dossier où tu lances claude>, ou sans --project pour utiliser le dossier courant.');
+    return null;
+  }
   const file = path.join(PROJECT, '.mcp.json');
   let json = {};
   try { json = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* absent */ }
@@ -92,6 +97,7 @@ function writeMcpJson() {
 const HOOK_EVENTS = ['UserPromptSubmit', 'PostToolUse', 'Stop', 'PreCompact', 'SessionStart', 'SessionEnd'];
 
 function writeHooks() {
+  if (!fs.existsSync(PROJECT)) return null;
   const dir = path.join(PROJECT, '.claude');
   const file = path.join(dir, 'settings.json');
   fs.mkdirSync(dir, { recursive: true });
@@ -200,9 +206,12 @@ process.on('SIGTERM', shutdown);
   });
   if (!ready) { console.error('❌ Le relais ne démarre pas (port déjà pris ?).'); shutdown(); }
 
-  const mcpFile = writeMcpJson();
-  const hooksFile = ARGS.hooks ? writeHooks() : null;
-  const publicUrl = ARGS.tunnel ? await startTunnel(ARGS.tunnel === true ? 'cloudflared' : ARGS.tunnel) : null;
+  let mcpFile = null, hooksFile = null, publicUrl = null;
+  try { mcpFile = writeMcpJson(); } catch (e) { console.error(`⚠️  .mcp.json non écrit : ${e.message}`); }
+  try { hooksFile = ARGS.hooks ? writeHooks() : null; } catch (e) { console.error(`⚠️  hooks non écrits : ${e.message}`); }
+  try {
+    publicUrl = ARGS.tunnel ? await startTunnel(ARGS.tunnel === true ? 'cloudflared' : ARGS.tunnel) : null;
+  } catch (e) { console.error(`⚠️  tunnel : ${e.message}`); }
   if (ARGS.tunnel && !publicUrl) console.error('⚠️  Tunnel non établi — accès LAN uniquement.');
 
   const ips = lanIPs();
@@ -226,8 +235,10 @@ process.on('SIGTERM', shutdown);
   console.log(`\n🧑 HUMAIN (CLI)`);
   console.log(`   export CLAUDE_COMM_RELAY=${localUrl} CLAUDE_COMM_TOKEN=${SECRET} CLAUDE_COMM_CHANNEL=${CHANNEL}`);
   console.log(`   node ${path.join(ROOT, 'server.js')} status | questions | answer Qx "..." | standup 30`);
-  console.log(`\n📄 Écrit : ${mcpFile}${hooksFile ? ` + ${hooksFile} (hooks)` : ''}`);
-  if (!hooksFile) console.log(`   (relance avec --hooks pour les notifications en direct + détection compaction)`);
+  if (mcpFile) {
+    console.log(`\n📄 Écrit : ${mcpFile}${hooksFile ? ` + ${hooksFile} (hooks)` : ''}`);
+    if (!hooksFile) console.log(`   (relance avec --hooks pour les notifications en direct + détection compaction)`);
+  }
   console.log(`\nCtrl+C pour tout arrêter. Jeton complet : ${SECRET}`);
   console.log(sep);
 })();
