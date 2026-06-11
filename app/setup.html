@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>claude-comm — configuration</title>
+<style>
+  body { margin:0; padding:24px; background:#0d1117; color:#e6edf3;
+    font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .dim { color:#8b949e; font-size:12px; }
+  .mode { display:flex; gap:10px; margin:18px 0; }
+  .mode button { flex:1; padding:14px 10px; background:#161b22; color:#e6edf3;
+    border:1px solid #30363d; border-radius:8px; cursor:pointer; font:inherit; text-align:left; }
+  .mode button.sel { border-color:#1f6feb; background:#11203a; }
+  .mode b { display:block; margin-bottom:4px; }
+  label { display:block; margin:14px 0 4px; color:#8b949e; }
+  input { width:100%; box-sizing:border-box; padding:8px 10px; background:#0d1117;
+    color:#e6edf3; border:1px solid #30363d; border-radius:6px; font:inherit; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:14px; }
+  .row input[type=checkbox] { width:auto; }
+  .hidden { display:none; }
+  #go { margin-top:22px; width:100%; padding:12px; background:#1f6feb; color:#fff;
+    border:none; border-radius:8px; font:inherit; font-weight:bold; cursor:pointer; }
+  #err { color:#f85149; margin-top:10px; min-height:18px; }
+</style>
+</head>
+<body>
+  <h1>🛰 claude-comm</h1>
+  <p class="dim">Coordination en direct de tes sessions Claude. Choisis un mode — tu pourras en changer dans Paramètres.</p>
+
+  <div class="mode">
+    <button id="m-host" onclick="setMode('host')">
+      <b>🏠 Héberger ici</b>
+      <span class="dim">Ce PC devient le serveur. Les sessions, le téléphone et les autres machines s'y connectent.</span>
+    </button>
+    <button id="m-client" onclick="setMode('client')">
+      <b>🔌 Se connecter</b>
+      <span class="dim">À un relais existant : cloud (Render…), autre PC, téléphone.</span>
+    </button>
+  </div>
+
+  <div id="f-host" class="hidden">
+    <label>Port</label>
+    <input id="port" value="8787">
+    <div class="row">
+      <input type="checkbox" id="expose">
+      <label for="expose" style="margin:0">Exposer sur Internet (pour accéder au dashboard et connecter des sessions depuis l'extérieur)</label>
+    </div>
+    <p class="dim">Le jeton secret est généré et conservé automatiquement. Sur le téléphone : l'app te donnera l'adresse et un code d'appairage à 6 chiffres (menu « Connexion d'autres appareils »).</p>
+  </div>
+
+  <div id="f-client" class="hidden">
+    <label>URL du relais</label>
+    <input id="relayUrl" placeholder="https://mon-relais.onrender.com">
+    <label>Jeton</label>
+    <input id="token" type="password">
+  </div>
+
+  <label>Canal (un par projet)</label>
+  <input id="channel" value="default">
+
+  <button id="go" onclick="go()">Démarrer</button>
+  <div id="err"></div>
+
+<script>
+  const { ipcRenderer } = require('electron');
+  let mode = null;
+  const $ = (id) => document.getElementById(id);
+
+  function setMode(m) {
+    mode = m;
+    $('m-host').classList.toggle('sel', m === 'host');
+    $('m-client').classList.toggle('sel', m === 'client');
+    $('f-host').classList.toggle('hidden', m !== 'host');
+    $('f-client').classList.toggle('hidden', m !== 'client');
+  }
+
+  // pré-remplissage quand on rouvre les Paramètres
+  try {
+    const prefill = JSON.parse(decodeURIComponent(location.hash.slice(1)));
+    if (prefill && prefill.mode) {
+      setMode(prefill.mode);
+      if (prefill.port) $('port').value = prefill.port;
+      if (prefill.expose) $('expose').checked = true;
+      if (prefill.relayUrl) $('relayUrl').value = prefill.relayUrl;
+      if (prefill.token && prefill.mode === 'client') $('token').value = prefill.token;
+      if (prefill.channel) $('channel').value = prefill.channel;
+    }
+  } catch { /* premier lancement */ }
+
+  async function go() {
+    $('err').textContent = '';
+    if (!mode) { $('err').textContent = 'Choisis un mode.'; return; }
+    const channel = $('channel').value.trim() || 'default';
+    if (mode === 'client') {
+      const url = $('relayUrl').value.trim().replace(/\/+$/, '');
+      const token = $('token').value.trim();
+      if (!url || !token) { $('err').textContent = 'URL et jeton requis.'; return; }
+      $('go').textContent = 'Vérification…';
+      const test = await ipcRenderer.invoke('setup-test', { url, token });
+      $('go').textContent = 'Démarrer';
+      if (!test.ok) { $('err').textContent = `Connexion impossible : ${test.error}`; return; }
+      await ipcRenderer.invoke('setup-save', { mode, relayUrl: url, token, channel });
+    } else {
+      const port = Math.max(1, Math.min(65535, Number($('port').value) || 8787));
+      await ipcRenderer.invoke('setup-save', { mode, port, expose: $('expose').checked, channel });
+    }
+  }
+</script>
+</body>
+</html>

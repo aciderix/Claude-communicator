@@ -1,0 +1,47 @@
+# Construit les installeurs de l'application de bureau claude-comm
+# (Windows .exe, macOS .dmg, Linux .AppImage) — aucun outil local requis.
+#
+# Déclenchement : manuellement (onglet Actions → build-app → Run workflow)
+# ou en poussant un tag v* (ex: v5.0.0). Les installeurs sont disponibles
+# dans les artefacts du run (et attachés à la release si tag).
+name: build-app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Installer les dépendances de l'app
+        working-directory: app
+        run: npm install
+      - name: Construire l'installeur
+        working-directory: app
+        run: npm run dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-comm-${{ matrix.os }}
+          path: |
+            app/dist/*.exe
+            app/dist/*.dmg
+            app/dist/*.AppImage
+          if-no-files-found: error
+      - name: Joindre à la release (si tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/dist/*.exe
+            app/dist/*.dmg
+            app/dist/*.AppImage

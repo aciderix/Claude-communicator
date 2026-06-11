@@ -1,0 +1,35 @@
+{
+  "name": "claude-comm-app",
+  "version": "1.0.0",
+  "description": "claude-comm — application de bureau : relais intégré + dashboard, sans ligne de commande",
+  "main": "main.js",
+  "author": "claude-comm",
+  "license": "MIT",
+  "scripts": {
+    "prestart": "node copy-relay.js && node make-icon.js",
+    "start": "electron .",
+    "predist": "node copy-relay.js && node make-icon.js",
+    "dist": "electron-builder --publish never"
+  },
+  "dependencies": {
+    "localtunnel": "^2.0.2"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.claudecomm.app",
+    "productName": "claude-comm",
+    "files": [
+      "main.js",
+      "setup.html",
+      "icon.png",
+      "relay/**",
+      "node_modules/**"
+    ],
+    "mac": { "target": "dmg", "icon": "icon.png" },
+    "win": { "target": "nsis", "icon": "icon.png" },
+    "linux": { "target": "AppImage", "icon": "icon.png", "category": "Development" }
+  }
+}

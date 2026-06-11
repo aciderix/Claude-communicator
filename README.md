@@ -240,7 +240,32 @@ navigateur, saisissez le jeton (gardé en localStorage) et le canal.
 Astuce : même sur une seule machine, lancer le relais en local
 (`node relay.js`) donne accès au dashboard.
 
-## Zéro manip au quotidien (mode « app »)
+## Application de bureau (zéro ligne de commande)
+
+Une vraie app installable — double-clic, pas de terminal, pas de
+navigateur :
+
+- **Windows** `.exe` · **macOS** `.dmg` · **Linux** `.AppImage`, construits
+  automatiquement par GitHub Actions (onglet *Actions* → `build-app` →
+  *Run workflow*, ou en poussant un tag `v*` : les installeurs sont
+  attachés à la release).
+- Au premier lancement, l'app demande un choix (modifiable ensuite dans
+  *Paramètres*) :
+  - **🏠 Héberger ici** — ce PC devient le serveur : le relais embarqué
+    démarre tout seul (secret généré et conservé, état persistant,
+    appairage mobile), avec une case « Exposer sur Internet » (tunnel
+    intégré) pour y accéder depuis l'extérieur. Le menu « Connexion
+    d'autres appareils » affiche l'adresse, le code d'appairage et la
+    commande pour les sessions d'autres machines.
+  - **🔌 Se connecter** — à un relais existant (cloud, autre PC,
+    téléphone) : URL + jeton, vérifiés avant enregistrement.
+- L'app n'est qu'une porte d'entrée de plus : le CLI, le relais cloud,
+  Termux et le dashboard navigateur continuent de fonctionner en
+  parallèle sur le même canal.
+
+Développement local : `cd app && npm install && npm start`.
+
+## Zéro manip au quotidien (relais hébergé)
 
 Les commandes (tunnels, exports, `up.js`…) n'existent que si vous hébergez
 le relais sur un appareil personnel. Pour ne **plus jamais taper de
