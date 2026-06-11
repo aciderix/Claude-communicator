@@ -347,6 +347,9 @@ async function handle(req, res) {
   if (req.method === 'GET' && u.pathname === '/channels') {
     return json(res, 200, { channels: [...channels.keys()] });
   }
+  if (req.method === 'GET' && u.pathname === '/pair-code') {
+    return json(res, 200, { code: PAIR_ENABLED && pairing ? pairing.code : null });
+  }
   const ip = req.socket.remoteAddress || '?';
   if (rateLimited(ip)) return json(res, 429, { error: 'Débit trop élevé, réessaie dans une minute.' });
 
@@ -628,6 +631,15 @@ if (ARGS['tls-cert'] && ARGS['tls-key']) {
 }
 server.requestTimeout = 0;       // long-polls
 server.headersTimeout = 65000;
+
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`❌ Le port ${PORT} est déjà utilisé — un relais tourne peut-être déjà.`);
+    console.error('   Arrête-le (pkill -f relay.js) ou choisis un autre port avec --port.');
+    process.exit(1);
+  }
+  throw e;
+});
 
 server.listen(PORT, HOST, () => {
   const proto = ARGS['tls-cert'] ? 'https' : 'http';

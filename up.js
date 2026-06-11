@@ -175,36 +175,71 @@ async function startTunnel(kind) {
 
 const children = [];
 
-function shutdown() {
+function killChildren() {
   for (const c of children) { try { c.kill('SIGTERM'); } catch { /* déjà mort */ } }
-  process.exit(0);
 }
+
+function shutdown() { killChildren(); process.exit(0); }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+process.on('exit', killChildren);
+process.on('uncaughtException', (e) => { console.error(`❌ ${e.message}`); killChildren(); process.exit(1); });
+
+// Un relais tourne déjà sur ce port ? S'il utilise notre secret (lancement
+// précédent), on le réutilise au lieu d'échouer sur EADDRINUSE.
+async function probeExisting() {
+  const t = (ms) => ({ signal: AbortSignal.timeout(ms) });
+  try {
+    const h = await fetch(`http://127.0.0.1:${PORT}/healthz`, t(1500));
+    if (!h.ok) return 'busy';
+    const data = await h.json().catch(() => null);
+    if (!data || data.ok !== true) return 'busy';
+    const c = await fetch(`http://127.0.0.1:${PORT}/channels`,
+      { headers: { authorization: `Bearer ${SECRET}` }, ...t(1500) });
+    return c.ok ? 'ours' : 'other';
+  } catch { return 'free'; }
+}
 
 (async () => {
-  const relay = spawn(process.execPath, [
-    path.join(ROOT, 'relay.js'),
-    '--host', '0.0.0.0', '--port', String(PORT),
-    '--secret', SECRET, '--data', path.join(HOME_DIR, 'relay-data'),
-    '--pair',
-  ], { stdio: ['ignore', 'inherit', 'pipe'] });
-  children.push(relay);
-  relay.on('exit', (code) => {
-    console.error(`Le relais s'est arrêté (code ${code}).`);
-    process.exit(code || 1);
-  });
+  const probe = await probeExisting();
+  if (probe === 'busy' || probe === 'other') {
+    console.error(`❌ Le port ${PORT} est occupé par ${probe === 'other' ? 'un relais utilisant un autre secret' : 'un autre service'}.`);
+    console.error(`   Arrête-le (pkill -f relay.js) ou relance avec --port ${PORT + 1}.`);
+    process.exit(1);
+  }
+  const reused = probe === 'ours';
 
-  // relaie la sortie du relais (codes d'appairage inclus) et attend l'écoute
-  let ready = false;
-  await new Promise((resolve) => {
-    const timer = setTimeout(resolve, 8000);
-    relay.stderr.on('data', (d) => {
-      process.stderr.write(d);
-      if (!ready && String(d).includes("à l'écoute")) { ready = true; clearTimeout(timer); resolve(); }
+  if (reused) {
+    console.error(`♻️  Un relais claude-comm tourne déjà sur le port ${PORT} avec ce secret — je le réutilise.`);
+    try {
+      const d = await (await fetch(`http://127.0.0.1:${PORT}/pair-code`,
+        { headers: { authorization: `Bearer ${SECRET}` }, signal: AbortSignal.timeout(1500) })).json();
+      if (d.code) console.error(`📱 Code d'appairage dashboard : ${d.code}`);
+    } catch { /* ancienne version sans /pair-code */ }
+  } else {
+    const relay = spawn(process.execPath, [
+      path.join(ROOT, 'relay.js'),
+      '--host', '0.0.0.0', '--port', String(PORT),
+      '--secret', SECRET, '--data', path.join(HOME_DIR, 'relay-data'),
+      '--pair',
+    ], { stdio: ['ignore', 'inherit', 'pipe'] });
+    children.push(relay);
+    relay.on('exit', (code) => {
+      console.error(`Le relais s'est arrêté (code ${code}).`);
+      process.exit(code || 1);
     });
-  });
-  if (!ready) { console.error('❌ Le relais ne démarre pas (port déjà pris ?).'); shutdown(); }
+
+    // relaie la sortie du relais (codes d'appairage inclus) et attend l'écoute
+    let ready = false;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 8000);
+      relay.stderr.on('data', (d) => {
+        process.stderr.write(d);
+        if (!ready && String(d).includes("à l'écoute")) { ready = true; clearTimeout(timer); resolve(); }
+      });
+    });
+    if (!ready) { console.error('❌ Le relais ne démarre pas.'); killChildren(); process.exit(1); }
+  }
 
   let mcpFile = null, hooksFile = null, publicUrl = null;
   try { mcpFile = writeMcpJson(); } catch (e) { console.error(`⚠️  .mcp.json non écrit : ${e.message}`); }
@@ -239,6 +274,8 @@ process.on('SIGTERM', shutdown);
     console.log(`\n📄 Écrit : ${mcpFile}${hooksFile ? ` + ${hooksFile} (hooks)` : ''}`);
     if (!hooksFile) console.log(`   (relance avec --hooks pour les notifications en direct + détection compaction)`);
   }
-  console.log(`\nCtrl+C pour tout arrêter. Jeton complet : ${SECRET}`);
+  console.log(reused
+    ? `\nRelais réutilisé (pour tout arrêter : pkill -f relay.js). Jeton complet : ${SECRET}`
+    : `\nCtrl+C pour tout arrêter. Jeton complet : ${SECRET}`);
   console.log(sep);
 })();

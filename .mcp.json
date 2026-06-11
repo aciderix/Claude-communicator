@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "comm": {
+      "command": "node",
+      "args": [
+        "/home/user/Claude-communicator/server.js"
+      ]
+    }
+  }
+}
