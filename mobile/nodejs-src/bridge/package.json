@@ -1,0 +1,6 @@
+{
+  "name": "bridge",
+  "version": "1.0.0",
+  "description": "Module bridge pour capacitor-nodejs, réimplémenté : la version publiée du plugin ne l'embarque pas (assets construits uniquement à la publication npm, jamais effectuée). Protocole reconstitué depuis les sources natives (bridge.cpp / CapacitorNodeJS.java).",
+  "main": "index.js"
+}

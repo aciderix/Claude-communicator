@@ -61,11 +61,9 @@ jobs:
       - name: Dépendances Capacitor
         working-directory: mobile
         run: npm install
-      - name: Assets (dashboard + relais embarqué)
+      - name: Assets (dashboard + relais embarqué + bridge)
         working-directory: mobile
-        run: |
-          node copy-assets.js
-          cd www/nodejs && npm install --omit=dev
+        run: node copy-assets.js
       - name: Synchronisation Capacitor
         working-directory: mobile
         run: npx cap sync android
