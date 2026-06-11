@@ -190,16 +190,38 @@ async function startTunnel(kind) {
   }
   const child = spawn(bin, ['tunnel', '--url', `http://127.0.0.1:${PORT}`, '--no-autoupdate'], { stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);
+  console.error('⏳ Établissement du tunnel cloudflared (jusqu\'à 90 s, surtout sur mobile)…');
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), 30000);
     let buf = '';
+    let resolved = false;
+    const finish = (v) => { if (!resolved) { resolved = true; resolve(v); } };
+    const timer = setTimeout(() => {
+      const errs = (buf.match(/ERR.*$/gm) || []).slice(-3).join('\n    ');
+      if (errs) console.error(`⚠️  cloudflared en difficulté :\n    ${errs}`);
+      console.error('    Le tunnel peut encore s\'établir : son URL s\'affichera alors ci-dessous.');
+      console.error('    Sinon, plan B sans binaire : pkg install openssh && node up.js --tunnel pinggy');
+      finish(null);
+    }, 90000);
     child.stderr.on('data', (d) => {
       buf += d;
       // ignorer api.trycloudflare.com (endpoint interne des logs cloudflared) :
       // l'URL attribuée est du type https://mots-aleatoires.trycloudflare.com
       const urls = buf.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/g) || [];
       const real = urls.find((u) => u !== 'https://api.trycloudflare.com');
-      if (real) { clearTimeout(timer); resolve(real); }
+      if (real) {
+        clearTimeout(timer);
+        if (resolved) console.log(`\n🌐 Tunnel établi (tardivement) — URL publique : ${real}\n`);
+        finish(real);
+      }
+    });
+    child.on('exit', (code) => {
+      if (!resolved) {
+        clearTimeout(timer);
+        const errs = (buf.match(/ERR.*$/gm) || []).slice(-3).join('\n    ');
+        console.error(`⚠️  cloudflared s'est arrêté (code ${code}).${errs ? `\n    ${errs}` : ''}`);
+        console.error('    Plan B sans binaire : pkg install openssh && node up.js --tunnel pinggy');
+        finish(null);
+      }
     });
   });
 }
