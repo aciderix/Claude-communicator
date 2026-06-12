@@ -35,6 +35,17 @@ public class MainActivity extends BridgeActivity {
         super.onResume();
         final WebView wv = this.bridge.getWebView();
         if (wv == null) return;
+
+        // Correctif MIUI « WebView noir au retour » : le renderer est souvent
+        // VIVANT mais le compositeur ne redessine pas la surface. Re-dessin
+        // forcé par bascule de visibilité + invalidation.
+        wv.setVisibility(android.view.View.GONE);
+        wv.postDelayed(() -> {
+            wv.setVisibility(android.view.View.VISIBLE);
+            wv.postInvalidate();
+        }, 60);
+
+        // Et si le renderer est réellement mort : sonde JS, recréation.
         final boolean[] alive = { false };
         try {
             wv.evaluateJavascript("1+1", value -> alive[0] = true);

@@ -28,6 +28,11 @@ public class KeepAlivePlugin extends Plugin {
     @PluginMethod
     public void enable(PluginCall call) {
         Intent intent = new Intent(getContext(), RelayForegroundService.class);
+        // identifiants du relais local : la notification de statut interroge
+        // le relais nativement (indépendant du WebView suspendu)
+        intent.putExtra("token", call.getString("token", ""));
+        intent.putExtra("port", call.getInt("port", 8787));
+        intent.putExtra("channel", call.getString("channel", "default"));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getContext().startForegroundService(intent);
         } else {

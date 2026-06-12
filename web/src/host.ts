@@ -175,12 +175,18 @@ export async function startEmbeddedHost(
     info = await startViaHttp(payload, log);
     log('démarré via le canal HTTP ✅');
   }
-  // service de premier plan + wake lock : le relais survit à l'écran éteint
+  // service de premier plan + wake lock : le relais survit à l'écran éteint ;
+  // le service tient aussi la notification de statut (sessions, messages)
+  // en interrogeant le relais nativement
   try {
     const KA = (window as any).Capacitor?.Plugins?.KeepAlive;
     if (KA) {
-      await KA.enable();
-      log('🔋 service de premier plan actif — le relais survit à l\'écran éteint');
+      await KA.enable({
+        token: info.secret,
+        port: info.port,
+        channel: localStorage.getItem('cc_channel') || 'default',
+      });
+      log('🔋 service de premier plan actif — relais + notification de statut');
     }
   } catch (e: any) {
     log(`keep-alive indisponible : ${e.message || e}`);
