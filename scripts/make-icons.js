@@ -197,8 +197,6 @@ try { fs.unlinkSync(path.join(RES, 'drawable', 'ic_launcher_background.xml')); }
 try { fs.unlinkSync(path.join(RES, 'drawable-v24', 'ic_launcher_foreground.xml')); } catch { /* déjà absent */ }
 
 // desktop (Electron)
-fs.copyFileSync(SRC, path.join(ROOT, 'app', 'icon-src.png'));
-console.log('app/icon-src.png (Electron)');
 
 // web (PWA)
 fs.copyFileSync(SRC, path.join(ROOT, 'web', 'public', 'icon.png'));
