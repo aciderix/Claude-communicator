@@ -14,10 +14,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         // Android peut tuer le processus de rendu du WebView en arrière-plan :
-        // sans gestion, l'app revient sur un écran noir définitif. On recrée
-        // l'activité — l'UI recharge et le relais embarqué (qui vit dans le
-        // processus principal, pas dans le renderer) reste intact ; sinon le
-        // redémarrage automatique côté dashboard prend le relais.
+        // sans gestion, l'app revient sur un écran noir définitif.
         this.bridge.getWebView().setWebViewClient(new BridgeWebViewClient(this.bridge) {
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
@@ -25,5 +22,29 @@ public class MainActivity extends BridgeActivity {
                 return true; // géré : ne pas tuer l'application
             }
         });
+    }
+
+    /**
+     * Défense complémentaire (constaté en test réel : l'écran noir survit au
+     * correctif ci-dessus, le callback pouvant être repris par Capacitor) :
+     * à chaque retour au premier plan, on sonde le moteur JS du WebView ;
+     * s'il ne répond pas en 3 s, le renderer est mort → recréation.
+     */
+    @Override
+    public void onResume() {
+        super.onResume();
+        final WebView wv = this.bridge.getWebView();
+        if (wv == null) return;
+        final boolean[] alive = { false };
+        try {
+            wv.evaluateJavascript("1+1", value -> alive[0] = true);
+        } catch (Exception e) {
+            alive[0] = false;
+        }
+        wv.postDelayed(() -> {
+            if (!alive[0]) {
+                runOnUiThread(this::recreate);
+            }
+        }, 3000);
     }
 }
