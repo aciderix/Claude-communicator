@@ -349,7 +349,7 @@ export default function Dashboard({
       {showHostInfo && hostInfo && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-[#050505]/80 backdrop-blur-sm" onClick={() => setShowHostInfo(false)}></div>
-          <Card className="relative w-full max-w-md p-5 border border-slate-800 shadow-2xl bg-[#0d1117] space-y-3">
+          <Card className="relative w-full max-w-md max-h-[85vh] overflow-y-auto custom-scrollbar p-5 border border-slate-800 shadow-2xl bg-[#0d1117] space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-medium text-slate-200 uppercase tracking-wider text-xs">Connexion d'autres appareils</h3>
               <button onClick={() => setShowHostInfo(false)} className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-slate-800 text-slate-400 hover:text-white">
