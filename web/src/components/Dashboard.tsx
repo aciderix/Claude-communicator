@@ -109,7 +109,26 @@ export default function Dashboard({
     };
 
     poll();
-    return () => { runningRef.current = false; };
+
+    // Android suspend le JS du WebView en arrière-plan : au retour au
+    // premier plan, on force un état frais sans attendre le long-poll gelé.
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      api.getState(channel, 0).then((s) => {
+        if (!runningRef.current) return;
+        versionRef.current = s.version;
+        setState(s);
+        setStandup(s.config?.standup_minutes || 0);
+        setStatusMsg(`Connecté · v${s.version}`);
+        setErrorStatus(false);
+      }).catch(() => {});
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      runningRef.current = false;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [base, token, channel]);
 
   const loadDiff = async (peer: string, mode: string) => {

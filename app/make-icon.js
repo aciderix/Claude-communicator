@@ -1,9 +1,17 @@
-/* Génère app/icon.png (512×512) sans aucune dépendance : encodeur PNG
- * minimal (zlib + CRC) dessinant le logo claude-comm (deux nœuds reliés). */
+/* Fournit app/icon.png (512×512) : copie appicon.png du dépôt s'il existe
+ * (icône officielle), sinon génère un logo de secours sans dépendance
+ * (encodeur PNG minimal : zlib + CRC). */
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+
+const OFFICIAL = path.join(__dirname, '..', 'appicon.png');
+if (fs.existsSync(OFFICIAL)) {
+  fs.copyFileSync(OFFICIAL, path.join(__dirname, 'icon.png'));
+  console.log('icon.png copié depuis appicon.png');
+  process.exit(0);
+}
 
 const S = 512;
 const px = Buffer.alloc(S * S * 4);
