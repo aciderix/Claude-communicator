@@ -68,7 +68,25 @@
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let mode = localStorage.getItem('cc_mode') || null;
+
+async function copyText(btn, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✅ copié';
+  } catch {
+    // repli WebView sans API clipboard
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    btn.textContent = document.execCommand('copy') ? '✅ copié' : '❌';
+    ta.remove();
+  }
+  setTimeout(() => { btn.textContent = '📋 copier'; }, 2000);
+}
 
 function setMode(m) {
   mode = m;
@@ -217,14 +235,24 @@ async function go() {
     if (mode === 'host') {
       localStorage.setItem('cc_mode', 'host');
       const info = await startHost();
-      const lines = [`📶 Même WiFi : http://${info.lanIp || '?'}:${info.port}`];
-      if (info.publicUrl) lines.push(`🌍 Internet : ${info.publicUrl}`);
-      lines.push(`🔑 Jeton : ${info.secret}`);
-      lines.push('(sessions PC : CLAUDE_COMM_RELAY=<url ci-dessus> CLAUDE_COMM_TOKEN=<jeton> claude)');
-      $('info').innerHTML = lines.map((l) => l.replace(/</g, '&lt;')).join('<br>');
+      const wifiUrl = `http://${info.lanIp || '?'}:${info.port}`;
+      const hostInfo = { wifiUrl, publicUrl: info.publicUrl || '', token: info.secret, channel };
+      localStorage.setItem('cc_host_info', JSON.stringify(hostInfo));
+      const row = (label, value) => value ? `
+        <div class="row" style="margin:8px 0">
+          <span style="flex:1;min-width:0;word-break:break-all"><span class="dim">${label}</span><br>${esc(value)}</span>
+          <button onclick="copyText(this, '${esc(value)}')">📋 copier</button>
+        </div>` : '';
+      $('info').innerHTML =
+        row('📶 Même WiFi', wifiUrl) +
+        row('🌍 Internet', info.publicUrl) +
+        row('🔑 Jeton', info.secret) +
+        `<div class="dim" style="margin:8px 0">Sessions PC : CLAUDE_COMM_RELAY=&lt;url&gt; CLAUDE_COMM_TOKEN=&lt;jeton&gt; claude<br>
+          Ces infos restent disponibles dans le dashboard (bouton ℹ️).</div>
+        <button id="open-dash" style="width:100%;padding:12px;background:#1f6feb;color:#fff;border:none;border-radius:8px;font:inherit;font-weight:bold"
+          onclick="openDashboard('http://127.0.0.1:${info.port}', '${esc(info.secret)}', '${esc(channel)}')">Ouvrir le dashboard →</button>`;
       $('info').classList.remove('hidden');
-      status('Relais démarré ✅ — ouverture du dashboard dans 6 s…');
-      setTimeout(() => openDashboard('http://127.0.0.1:8787', info.secret, channel), 6000);
+      status('Relais démarré ✅ — copie tes infos puis ouvre le dashboard.');
     } else if (mode === 'client') {
       localStorage.setItem('cc_mode', 'client');
       const url = $('relayUrl').value.trim().replace(/\/+$/, '');

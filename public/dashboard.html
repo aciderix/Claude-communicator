@@ -72,6 +72,7 @@
 <header>
   <h1>🛰 claude-comm</h1>
   <span id="hdr-controls" class="hidden">
+    <button id="host-info-btn" class="hidden" onclick="showHostInfo()" title="Infos de connexion (URL, jeton)">ℹ️</button>
     <input id="channel" size="10" title="canal" list="channel-list">
     <datalist id="channel-list"></datalist>
     <button onclick="reconnect()">changer</button>
@@ -136,6 +137,14 @@
     <div id="notes"></div>
   </section>
 </main>
+
+<dialog id="host-info-dialog">
+  <div class="row" style="justify-content:space-between">
+    <strong>Connexion d'autres appareils</strong>
+    <button onclick="document.getElementById('host-info-dialog').close()">fermer</button>
+  </div>
+  <div id="host-info-body" style="margin-top:10px"></div>
+</dialog>
 
 <dialog id="diff-dialog">
   <div class="row" style="justify-content:space-between">
@@ -394,6 +403,39 @@ async function saveStandup() {
     setStatus('standup mis à jour', 'ok');
   } catch (e) { setStatus(`config : ${e.message}`, 'err'); }
 }
+
+// Infos d'hébergement (app mobile/desktop en mode hôte) : URL, jeton…
+async function copyText(btn, text) {
+  try { await navigator.clipboard.writeText(text); btn.textContent = '✅'; }
+  catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    btn.textContent = document.execCommand('copy') ? '✅' : '❌';
+    ta.remove();
+  }
+  setTimeout(() => { btn.textContent = '📋'; }, 2000);
+}
+
+function showHostInfo() {
+  let info = null;
+  try { info = JSON.parse(localStorage.getItem('cc_host_info')); } catch { /* absent */ }
+  if (!info) return;
+  const row = (label, value) => value ? `
+    <div class="row" style="margin:8px 0">
+      <span style="flex:1;min-width:0;word-break:break-all"><span class="dim">${esc(label)}</span><br>${esc(value)}</span>
+      <button onclick="copyText(this, '${esc(value)}')">📋</button>
+    </div>` : '';
+  $('host-info-body').innerHTML =
+    row('📶 Même WiFi', info.wifiUrl) +
+    row('🌍 Internet', info.publicUrl) +
+    row('🔑 Jeton', info.token) +
+    row('📡 Canal', info.channel) +
+    `<div class="dim">Sessions PC : CLAUDE_COMM_RELAY=&lt;url&gt; CLAUDE_COMM_TOKEN=&lt;jeton&gt; claude</div>`;
+  $('host-info-dialog').showModal();
+}
+if (localStorage.getItem('cc_host_info')) $('host-info-btn')?.classList.remove('hidden');
 
 function openDiff(peer) { currentDiffPeer = peer; $('diff-dialog').showModal(); loadDiff(peer, 'stat'); }
 
