@@ -111,19 +111,42 @@ async function startRelay(cfg) {
     DIAG.started = true;
 
     if (cfg.expose) {
-      try {
-        step('ouverture du tunnel…');
-        const localtunnel = require('localtunnel');
-        const tunnel = await localtunnel({ port, local_host: '127.0.0.1' });
-        DIAG.info.publicUrl = tunnel.url;
-        step(`tunnel : ${tunnel.url}`);
-        tunnel.on('close', () => { if (DIAG.info) DIAG.info.publicUrl = null; });
-      } catch (e) { fail(`tunnel : ${e.message}`); }
+      await openTunnel(port);
     }
     return DIAG.info;
   })();
   try { return await starting; }
   catch (e) { starting = null; fail(`startRelay : ${e.message}`); throw e; }
+}
+
+// Tunnel public : tunnelmole d'abord (stable lors de nos tests terrain),
+// localtunnel en secours (loca.lt souffre de Bad Gateway par rafales).
+// Chaque tentative est bornée dans le temps pour ne jamais bloquer.
+const withTimeout = (p, ms, label) => Promise.race([
+  p,
+  new Promise((_r, rej) => setTimeout(() => rej(new Error(`${label} : délai dépassé (${ms / 1000}s)`)), ms)),
+]);
+
+async function openTunnel(port) {
+  step('ouverture du tunnel (tunnelmole)…');
+  try {
+    const { tunnelmole } = await import('tunnelmole');
+    const url = await withTimeout(tunnelmole({ port }), 30000, 'tunnelmole');
+    DIAG.info.publicUrl = String(url).replace(/^http:/, 'https:');
+    DIAG.info.tunnelProvider = 'tunnelmole';
+    step(`tunnel tunnelmole : ${DIAG.info.publicUrl}`);
+    return;
+  } catch (e) { fail(`tunnelmole : ${e.message}`); }
+
+  step('repli sur localtunnel…');
+  try {
+    const localtunnel = require('localtunnel');
+    const tunnel = await withTimeout(localtunnel({ port, local_host: '127.0.0.1' }), 30000, 'localtunnel');
+    DIAG.info.publicUrl = tunnel.url;
+    DIAG.info.tunnelProvider = 'localtunnel';
+    step(`tunnel localtunnel : ${tunnel.url}`);
+    tunnel.on('close', () => { if (DIAG.info) DIAG.info.publicUrl = null; });
+  } catch (e) { fail(`localtunnel : ${e.message}`); }
 }
 
 // --- canal 1 : bridge natif (optionnel) ----------------------------------------

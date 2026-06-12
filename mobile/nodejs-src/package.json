@@ -4,6 +4,7 @@
   "description": "Relais claude-comm embarqué dans l'app mobile (nodejs-mobile)",
   "main": "main.js",
   "dependencies": {
-    "localtunnel": "^2.0.2"
+    "localtunnel": "^2.0.2",
+    "tunnelmole": "^2.4.0"
   }
 }
