@@ -1,31 +1,29 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { ApiClient } from '../api';
 import { AppState } from '../types';
-import { MOCK_STATE } from '../mockData';
 import SessionsList from './SessionsList';
 import TasksPlan from './TasksPlan';
 import ConversationThread from './ConversationThread';
 import QuestionsList from './QuestionsList';
 import MiscLists from './MiscLists';
+import ChannelSelect from './ChannelSelect';
 import { Button, Input, Card, Badge } from './UI';
 import { LogOut, Activity, Map, MessageSquareText, MessageSquareDashed, X, FolderTree, Radio, Info, Timer } from 'lucide-react';
 import { CopyRow } from './LoginScreen';
+import { startEmbeddedHost, isNativeHostAvailable } from '../host';
 
-export default function Dashboard({ 
-  base, 
-  token, 
+export default function Dashboard({
+  base,
+  token,
   defaultChannel,
-  isMock, 
-  onLogout 
-}: { 
-  base: string; 
-  token: string; 
+  onLogout
+}: {
+  base: string;
+  token: string;
   defaultChannel: string;
-  isMock?: boolean;
-  onLogout: () => void 
+  onLogout: () => void
 }) {
   const [channel, setChannel] = useState(defaultChannel);
-  const [channelsList, setChannelsList] = useState<string[]>([]);
   const [state, setState] = useState<AppState | null>(null);
   const [currentView, setCurrentView] = useState<'overview' | 'plan' | 'questions' | 'messages' | 'system'>('overview');
   
@@ -50,6 +48,7 @@ export default function Dashboard({
 
   const versionRef = useRef(0);
   const runningRef = useRef(true);
+  const restartingRef = useRef(false);
   const api = new ApiClient(base, token);
 
   useEffect(() => {
@@ -57,24 +56,14 @@ export default function Dashboard({
     versionRef.current = 0;
     setState(null);
 
-    if (isMock) {
-      setTimeout(() => {
-        if (!runningRef.current) return;
-        setState(MOCK_STATE);
-        setChannelsList(['demo', 'mock-channel']);
-        setStatusMsg(`Mode Démo actif`);
-        setStandup(MOCK_STATE.config?.standup_minutes || 0);
-      }, 500);
-      return () => { runningRef.current = false; };
-    }
-
-    api.getChannels().then(list => setChannelsList(list)).catch(() => {});
 
     const poll = async () => {
+      let failures = 0;
       while (runningRef.current) {
         try {
           const s = await api.getState(channel, versionRef.current);
           if (!runningRef.current) break;
+          failures = 0;
           versionRef.current = s.version;
           setState(s);
           setStandup(s.config?.standup_minutes || 0);
@@ -82,12 +71,37 @@ export default function Dashboard({
           setErrorStatus(false);
         } catch (e: any) {
           if (!runningRef.current) break;
-          setStatusMsg(`Erreur : ${e.message}`);
+          failures++;
           setErrorStatus(true);
           if (String(e.message).includes('401')) {
             runningRef.current = false;
             onLogout();
             return;
+          }
+          // mode hôte : le relais vit dans CE processus — si l'app a été
+          // tuée (fermeture prolongée), on le redémarre automatiquement
+          if (failures >= 2 && !restartingRef.current &&
+              localStorage.getItem('cc_mode') === 'host' &&
+              base.includes('127.0.0.1') && isNativeHostAvailable()) {
+            restartingRef.current = true;
+            setStatusMsg('Relais arrêté — redémarrage automatique…');
+            try {
+              const expose = localStorage.getItem('cc_host_expose') === '1';
+              const info = await startEmbeddedHost(expose, (m) => setStatusMsg(m));
+              localStorage.setItem('cc_host_info', JSON.stringify({
+                wifiUrl: `http://${info.lanIp || '?'}:${info.port}`,
+                publicUrl: info.publicUrl || '',
+                token: info.secret,
+                channel,
+              }));
+              setStatusMsg('Relais redémarré ✅');
+              failures = 0;
+            } catch (err: any) {
+              setStatusMsg(`Redémarrage impossible : ${err.message}`);
+            }
+            restartingRef.current = false;
+          } else {
+            setStatusMsg(`Erreur : ${e.message}`);
           }
           await new Promise(r => setTimeout(r, 3000));
         }
@@ -96,15 +110,11 @@ export default function Dashboard({
 
     poll();
     return () => { runningRef.current = false; };
-  }, [base, token, channel, isMock]);
+  }, [base, token, channel]);
 
   const loadDiff = async (peer: string, mode: string) => {
     setDiffPeer(peer);
     setDiffContent(`Chargement du diff (${mode})...`);
-    if (isMock) {
-      setTimeout(() => setDiffContent(`+ Diff fictif\n- Suppression simulée`), 600);
-      return;
-    }
     const res = await api.requestDiff(channel, peer, mode);
     if (!runningRef.current) return;
     if (res.ok) setDiffContent(res.result || 'Aucun changement remonté.');
@@ -165,15 +175,12 @@ export default function Dashboard({
           )}
           <div className="space-y-2">
             <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Canal Actif</label>
-            {/* TODO: La détection de canal devra être automatique si ce n'est pas déjà le cas */}
-            <select
-              value={channel}
-              onChange={e => { if(!isMock) setChannel(e.target.value); }}
-              className="w-full text-xs h-9 bg-slate-950/50 border border-slate-800 rounded-md px-2 text-slate-300 outline-none focus:border-blue-500/50"
-            >
-              {channelsList.includes(channel) ? null : <option value={channel}>{channel}</option>}
-              {channelsList.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <ChannelSelect
+              channel={channel}
+              direction="up"
+              onSelect={(c) => { localStorage.setItem('cc_channel', c); setChannel(c); }}
+              fetchChannels={() => api.getChannels()}
+            />
           </div>
           <Button variant="ghost" onClick={onLogout} className="w-full justify-start text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 h-9">
             <LogOut className="w-4 h-4" /> Déconnexion
@@ -194,15 +201,13 @@ export default function Dashboard({
                </button>
              )}
              <span className={`w-1.5 h-1.5 rounded-full ${errorStatus ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`}></span>
-             {/* TODO: La détection de canal devra être automatique si ce n'est pas déjà le cas */}
-             <select
-               value={channel}
-               onChange={e => { if(!isMock) setChannel(e.target.value); }}
-               className="bg-slate-950/80 border border-slate-800 rounded text-[10px] uppercase tracking-wider text-slate-300 px-1 py-0.5 outline-none max-w-[120px]"
-             >
-               {channelsList.includes(channel) ? null : <option value={channel}>{channel}</option>}
-               {channelsList.map(c => <option key={c} value={c}>{c}</option>)}
-             </select>
+             <ChannelSelect
+               channel={channel}
+               direction="down"
+               compact
+               onSelect={(c) => { localStorage.setItem('cc_channel', c); setChannel(c); }}
+               fetchChannels={() => api.getChannels()}
+             />
            </div>
         </div>
       </header>
@@ -239,7 +244,7 @@ export default function Dashboard({
                 <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
                   <QuestionsList 
                     questions={state.user?.questions?.items || []} 
-                    onAnswer={(id, text) => { if(!isMock) api.answerQuestion(channel, id, text); }} 
+                    onAnswer={(id, text) => { api.answerQuestion(channel, id, text); }} 
                   />
                 </div>
               )}
@@ -250,7 +255,7 @@ export default function Dashboard({
                   <ConversationThread 
                     msgs={state.user?.msgs?.items || []} 
                     sessions={state.sessions}
-                    onSend={(to, body) => { if(!isMock) api.postMsg(channel, to, body); }}
+                    onSend={(to, body) => { api.postMsg(channel, to, body); }}
                   />
                 </div>
               )}
@@ -273,7 +278,6 @@ export default function Dashboard({
                         variant="secondary"
                         className="h-8 text-xs"
                         onClick={async () => {
-                          if (isMock) return;
                           await api.setStandup(channel, Number(standupDraft ?? standup) || 0);
                           setStandupDraft(null);
                           setStandupSaved(true);
@@ -336,10 +340,30 @@ export default function Dashboard({
             <CopyRow label="Local (WiFi)" value={hostInfo.wifiUrl || ''} />
             {hostInfo.publicUrl && <CopyRow label="Public (Internet)" value={hostInfo.publicUrl} />}
             <CopyRow label="Jeton secret" value={hostInfo.token || ''} />
-            <CopyRow label="Canal" value={hostInfo.channel || 'default'} />
-            <p className="text-xs text-slate-500">
-              Sessions PC : CLAUDE_COMM_RELAY=&lt;url&gt; CLAUDE_COMM_TOKEN=&lt;jeton&gt; claude
-            </p>
+            <CopyRow label="Canal" value={channel} />
+
+            <div className="pt-3 border-t border-slate-800 space-y-3">
+              <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                Connecter des sessions Claude (MCP)
+              </p>
+              <CopyRow
+                label="Session ponctuelle — à coller dans un terminal du projet"
+                value={`CLAUDE_COMM_NAME=alice CLAUDE_COMM_CHANNEL=${channel} CLAUDE_COMM_RELAY=${hostInfo.publicUrl || hostInfo.wifiUrl} CLAUDE_COMM_TOKEN=${hostInfo.token} claude`}
+              />
+              <CopyRow
+                label="Machine entière 1/2 — mémoriser la connexion"
+                value={`node server.js login ${hostInfo.publicUrl || hostInfo.wifiUrl} ${hostInfo.token} ${channel}`}
+              />
+              <CopyRow
+                label="Machine entière 2/2 — outils comm_* dans tous les projets"
+                value="claude mcp add comm --scope user -- node /chemin/claude-communicator/server.js"
+              />
+              <p className="text-xs text-slate-500">
+                server.js vient du dépôt claude-communicator (git clone, aucun npm install).
+                Après l'étape « machine entière », il suffit de lancer <span className="font-mono text-slate-400">claude</span> —
+                noms de session auto-générés, coordination via le protocole PROTOCOL.md.
+              </p>
+            </div>
           </Card>
         </div>
       )}

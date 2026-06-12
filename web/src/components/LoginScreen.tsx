@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Server, MonitorSmartphone, Radio, AlertCircle, LayoutTemplate, ArrowRight, Copy, Check } from 'lucide-react';
+import { Server, MonitorSmartphone, Radio, AlertCircle, ArrowRight, Copy, Check } from 'lucide-react';
 import { Card, Input, Button } from './UI';
 import { ApiClient } from '../api';
 import {
@@ -65,7 +65,7 @@ export function CopyRow({ label, value }: { label: string; value: string }) {
 }
 
 interface LoginScreenProps {
-  onLogin: (base: string, token: string, channel: string, isMock?: boolean) => void;
+  onLogin: (base: string, token: string, channel: string) => void;
 }
 
 export default function LoginScreen({ onLogin }: LoginScreenProps) {
@@ -126,6 +126,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       const info: HostInfo = await startEmbeddedHost(hostExpose, log);
       setHostInfo(info);
       setHostStatus('');
+      // mémorisé pour le redémarrage automatique du relais (réouverture d'app)
+      localStorage.setItem('cc_host_expose', hostExpose ? '1' : '0');
       keepAliveStatus().then(setKaStatus).catch(() => {});
       // pas d'auto-redirection : l'utilisateur copie ses infos puis ouvre
       // le dashboard lui-même ; les infos restent accessibles ensuite (ℹ️)
@@ -165,27 +167,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
         {!mode ? (
           <div className="space-y-4">
-            <button 
-              onClick={() => onLogin('', '', 'demo', true)}
-              className="w-full text-left p-5 rounded-2xl border border-white/5 bg-slate-900/50 hover:bg-slate-900 hover:border-white/10 transition-all flex items-center gap-4 group shadow-sm"
-            >
-              <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-500 shrink-0 group-hover:scale-110 transition-transform">
-                <LayoutTemplate className="w-5 h-5" />
-              </div>
-              <div className="flex-1">
-                <h3 className="text-slate-200 font-medium mb-1">Aperçu (Mode Démo)</h3>
-                <p className="text-slate-500 text-xs line-clamp-2">Explorer l'interface avec des données simulées réalistes.</p>
-              </div>
-              <ArrowRight className="w-4 h-4 text-slate-700 group-hover:text-amber-500 transition-colors" />
-            </button>
-
-            <div className="flex items-center gap-4 text-slate-700 text-xs font-medium uppercase tracking-widest py-2">
-              <div className="flex-1 h-px bg-white/5"></div>
-              Connexion
-              <div className="flex-1 h-px bg-white/5"></div>
-            </div>
-
-            <button 
+            <button
               onClick={() => setMode('client')}
               className="w-full text-left p-5 rounded-2xl border border-white/5 bg-slate-900/50 hover:bg-slate-900 hover:border-white/10 transition-all flex items-center gap-4 group shadow-sm"
             >
