@@ -133,21 +133,26 @@ async function startViaBridge(payload) {
     NodeJS.addListener('started', (e) => { clearTimeout(timer); resolve(unwrap(e)); });
   });
 
-  // Démarrage MANUEL : start() rejette avec la cause native exacte
-  // (copie du projet impossible, script introuvable, lib non chargée…).
-  dbg('NodeJS.start()…');
-  try {
-    await NodeJS.start();
-    dbg('NodeJS.start() ✅ (moteur lancé)');
-  } catch (e) {
-    const msg = String(unwrap(e) || (e && e.message) || e);
-    if (!/already been started/i.test(msg)) throw new Error(`moteur Node : ${msg}`);
-    dbg('moteur déjà démarré');
-  }
+  // Démarrage MANUEL. Subtilité nodejs-mobile : la promesse de start() ne
+  // se résout PAS tant que le moteur tourne (le thread natif est occupé par
+  // la boucle Node). On ne l'attend donc jamais — on ne surveille que son
+  // éventuel REJET immédiat (vraie erreur native : copie, script, lib…).
+  dbg('NodeJS.start()… (sa promesse reste en vol tant que le moteur tourne : normal)');
+  const startFailure = new Promise((_resolve, reject) => {
+    NodeJS.start().then(
+      () => dbg('moteur Node arrêté (start résolu)'),
+      (e) => {
+        const msg = String(unwrap(e) || (e && e.message) || e);
+        if (/already been started/i.test(msg)) dbg('moteur déjà démarré');
+        else reject(new Error(`moteur Node : ${msg}`));
+      }
+    );
+  });
 
   await Promise.race([
     NodeJS.whenReady(),
-    sleep(15000).then(() => { throw new Error('bridge : whenReady muet (15 s) après start'); }),
+    startFailure,
+    sleep(20000).then(() => { throw new Error('bridge : whenReady muet (20 s) après start'); }),
   ]);
   dbg('bridge : whenReady ✅');
   await NodeJS.send({ eventName: 'start', args: [payload] });
