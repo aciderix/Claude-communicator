@@ -326,6 +326,18 @@ try {
   DASHBOARD_HTML = fs.readFileSync(path.join(__dirname, 'public', 'dashboard.html'), 'utf8');
 } catch { /* dashboard absent : routes API seulement */ }
 
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json',
+  '.json': 'application/json',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json',
+};
+
 // Coquille PWA : fichiers statiques publics (aucune donnée du canal).
 const STATIC_FILES = {};
 for (const [route, file, type] of [
@@ -336,6 +348,25 @@ for (const [route, file, type] of [
   try {
     STATIC_FILES[route] = { body: fs.readFileSync(path.join(__dirname, 'public', file)), type };
   } catch { /* fichier absent */ }
+}
+
+// Interface React (web/dist) : servie à la racine quand elle a été
+// construite (npm run build dans web/). Sinon, repli sur le dashboard
+// vanilla ci-dessus — le relais reste zéro-dépendance.
+(function loadWebDist(dir, prefix) {
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    const route = `${prefix}/${e.name}`;
+    if (e.isDirectory()) { loadWebDist(full, route); continue; }
+    const type = MIME[path.extname(e.name).toLowerCase()] || 'application/octet-stream';
+    STATIC_FILES[route] = { body: fs.readFileSync(full), type };
+  }
+})(path.join(__dirname, 'web', 'dist'), '');
+if (STATIC_FILES['/index.html']) {
+  DASHBOARD_HTML = ''; // l'interface React remplace le dashboard vanilla
+  console.error('Interface React chargée (web/dist).');
 }
 
 async function handle(req, res) {
@@ -350,13 +381,24 @@ async function handle(req, res) {
   }
   // Le HTML du dashboard est public (il ne contient aucune donnée) :
   // le jeton est saisi dans l'interface et requis pour tous les appels API.
-  if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/dashboard') && DASHBOARD_HTML) {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    return res.end(DASHBOARD_HTML);
+  if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/dashboard')) {
+    const index = STATIC_FILES['/index.html'];
+    if (index) {
+      res.writeHead(200, { 'content-type': index.type, 'cache-control': 'no-store' });
+      return res.end(index.body);
+    }
+    if (DASHBOARD_HTML) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(DASHBOARD_HTML);
+    }
   }
   if (req.method === 'GET' && STATIC_FILES[u.pathname]) {
     const f = STATIC_FILES[u.pathname];
-    res.writeHead(200, { 'content-type': f.type, 'cache-control': 'no-store' });
+    const immutable = u.pathname.startsWith('/assets/');
+    res.writeHead(200, {
+      'content-type': f.type,
+      'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-store',
+    });
     return res.end(f.body);
   }
   if (req.method === 'POST' && u.pathname === '/pair') {

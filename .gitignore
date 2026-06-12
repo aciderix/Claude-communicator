@@ -14,3 +14,6 @@ mobile/android/app/build/
 mobile/android/.gradle/
 mobile/android/build/
 mobile/android/capacitor-cordova-android-plugins/build/
+web/node_modules/
+web/dist/
+mobile/www/
