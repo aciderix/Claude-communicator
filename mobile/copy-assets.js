@@ -41,4 +41,21 @@ execSync('npm install --omit=dev --no-audit --no-fund', { cwd: NODEDIR, stdio: '
 fs.cpSync(path.join(__dirname, 'nodejs-src', 'bridge'),
   path.join(NODEDIR, 'node_modules', 'bridge'), { recursive: true });
 
+// CRITIQUE : le bridge doit AUSSI aller dans les assets builtin_modules du
+// plugin (son emplacement officiel, mis sur NODE_PATH par le code natif).
+// Sans contenu réel dans ce dossier (son .gitkeep est exclu de l'APK par
+// le filtre AAPT « .* »), assetManager.list() le voit vide, le plugin le
+// copie comme un FICHIER → IOException → « Unable to copy the Node.js
+// project from APK » et le moteur ne démarre jamais.
+const PLUGIN_MODULES = path.join(__dirname, 'node_modules', 'capacitor-nodejs',
+  'android', 'src', 'main', 'assets', 'builtin_modules');
+if (fs.existsSync(path.dirname(PLUGIN_MODULES))) {
+  fs.cpSync(path.join(__dirname, 'nodejs-src', 'bridge'),
+    path.join(PLUGIN_MODULES, 'bridge'), { recursive: true });
+  console.log('bridge installé dans les assets builtin_modules du plugin');
+} else {
+  console.error('⚠️  plugin capacitor-nodejs introuvable — lance npm install d\'abord');
+  process.exit(1);
+}
+
 console.log('assets mobiles assemblés dans mobile/www/ (bridge inclus)');
