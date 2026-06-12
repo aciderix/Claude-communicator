@@ -35,23 +35,37 @@ export default function ConversationThread({ msgs, sessions, onSend }: { msgs: M
         ) : (
           msgs.map(m => (
             <div key={m.id} className="flex flex-col gap-2">
-              {/* Dev User Message */}
-              <div className="flex justify-end">
-                <div className="max-w-[85%] bg-blue-600/20 border border-blue-500/20 text-blue-100 rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm shadow-sm backdrop-blur-sm">
-                  <div className="text-blue-300 text-[10px] font-mono mb-1 uppercase tracking-wider flex justify-between gap-4">
-                     <span>À: {m.to}</span>
-                     <span className="opacity-70">{timeStr(m.ts)}</span>
-                  </div>
-                  <div className="whitespace-pre-wrap">{m.body}</div>
-                  {m.status === 'claimed' && m.claimed_by && (
-                    <div className="mt-2 text-xs text-blue-400 border-t border-blue-500/20 pt-1.5 flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
-                      {m.claimed_by} rédige une réponse...
+              {m.from && m.from !== 'user' ? (
+                /* Message spontané d'une session (action « post ») */
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] bg-[#1b2028] border border-white/5 text-slate-200 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm shadow-sm">
+                    <div className="text-slate-400 text-[10px] font-mono mb-1 flex items-center gap-1.5">
+                      <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></div>
+                      <span className="uppercase tracking-wider">{m.from}</span>
+                      <span className="opacity-50 ml-auto">{timeStr(m.ts)}</span>
                     </div>
-                  )}
+                    <div className="whitespace-pre-wrap leading-relaxed">{m.body}</div>
+                  </div>
                 </div>
-              </div>
-              
+              ) : (
+                /* Message de l'utilisateur */
+                <div className="flex justify-end">
+                  <div className="max-w-[85%] bg-blue-600/20 border border-blue-500/20 text-blue-100 rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm shadow-sm backdrop-blur-sm">
+                    <div className="text-blue-300 text-[10px] font-mono mb-1 uppercase tracking-wider flex justify-between gap-4">
+                       <span>À: {m.to}</span>
+                       <span className="opacity-70">{timeStr(m.ts)}</span>
+                    </div>
+                    <div className="whitespace-pre-wrap">{m.body}</div>
+                    {m.status === 'claimed' && m.claimed_by && (
+                      <div className="mt-2 text-xs text-blue-400 border-t border-blue-500/20 pt-1.5 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
+                        {m.claimed_by} rédige une réponse...
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Agent Replies */}
               {(m.replies || []).map((r: Reply, idx: number) => (
                 <div key={idx} className="flex justify-start">

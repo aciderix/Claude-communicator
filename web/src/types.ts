@@ -47,6 +47,8 @@ export interface Msg {
   id: string;
   to: string;
   ts: string;
+  /** présent quand le message vient d'une session (action « post ») */
+  from?: string;
   status?: string;
   claimed_by?: string;
   body: string;

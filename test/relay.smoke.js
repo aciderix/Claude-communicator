@@ -244,6 +244,35 @@ function ok(cond, label) {
       ok(carolPeers.text.includes('alice'), 'session sans aucune variable d\'env connectée via credentials.json');
     } finally { carol.close(); }
 
+    console.log('endpoint MCP distant (connecteur claude.ai)');
+    async function mcp(rpc, token = SECRET) {
+      const r = await fetch(`${RELAY_URL}/mcp/${encodeURIComponent(token)}/relay-test/claude-web`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(rpc),
+      });
+      return { status: r.status, data: await r.json().catch(() => null) };
+    }
+    const mcpBad = await mcp({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, 'mauvais');
+    ok(mcpBad.status === 401, 'MCP : jeton invalide refusé');
+    const mcpInit = await mcp({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
+    ok(mcpInit.data.result.serverInfo.name === 'claude-comm-relay', 'MCP : initialize');
+    const mcpTools = await mcp({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    ok(mcpTools.data.result.tools.length === 13, 'MCP : 13 outils exposés');
+    const mcpJoin = await mcp({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'comm_join', arguments: { role: 'mobile' } } });
+    ok(mcpJoin.data.result.content[0].text.includes('alice'), 'MCP : comm_join voit les pairs');
+    const mcpPost = await mcp({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'comm_user', arguments: { action: 'post', body: 'coucou depuis le connecteur' } } });
+    ok(mcpPost.data.result.content[0].text.includes('publié'), 'MCP : comm_user post écrit dans le fil');
+    const stMcp = await (await fetch(`${RELAY_URL}/c/relay-test/state`, { headers: H })).json();
+    const posted = stMcp.user.msgs.items.find((m) => m.from === 'claude-web');
+    ok(posted && posted.body.includes('coucou'), 'le post apparaît dans le fil utilisateur (avec from)');
+    const mcpSend = await mcp({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'comm_send', arguments: { to: 'alice', body: 'salut alice, ici le connecteur' } } });
+    ok(mcpSend.data.result.content[0].text.includes('envoyé à alice'), 'MCP : comm_send vers une session');
+    const aliceGets = await alice.call('comm_inbox', {});
+    ok(aliceGets.text.includes('ici le connecteur'), 'alice reçoit le message du connecteur');
+    const mcpDiff = await mcp({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'comm_diff', arguments: { peer: 'alice', mode: 'stat' } } });
+    ok(mcpDiff.data.result.content[0].text.includes('git status'), 'MCP : comm_diff répondu par la session pair');
+    const mcpNotif = await mcp({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    ok(mcpNotif.status === 202, 'MCP : notifications → 202 sans corps');
+
     console.log('client avec mauvais jeton');
     mallory = new Client('mallory', 'jeton-invalide');
     await mallory.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {} });

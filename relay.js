@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const {
-  sanitizeName, nowISO, newId, emptyTasks,
+  sanitizeName, nowISO, newId, emptyTasks, unmetDeps,
   applyTaskAction, applyLockAction, applyNoteAction,
   emptyPlan, applyPlanAction, emptyReviews, applyReviewAction,
   emptyUser, applyUserAction, userPost, userAnswer,
@@ -297,6 +297,366 @@ function broadcast(ch, from, kind, subject, body) {
   }
 }
 
+// Envoi d'un message direct/broadcast — partagé entre l'API HTTP et le MCP.
+function sendChannelMessage(ch, from, payload) {
+  const kind = ['message', 'question', 'status_request', 'diff_request', 'alert', 'task', 'notify']
+    .includes(payload.kind) ? payload.kind : 'message';
+  if (!payload.to || !payload.body) return { error: 'Paramètres requis : to, body.', status: 400 };
+  let targets;
+  if (payload.to === '*' || payload.to === 'all') {
+    targets = Object.keys(ch.sessions).filter((n) => n !== from);
+    if (!targets.length) return { error: 'Aucun pair connecté pour le broadcast.', status: 409 };
+  } else {
+    const t = sanitizeName(payload.to);
+    if (!ch.sessions[t]) {
+      const known = Object.keys(ch.sessions).join(', ') || '(aucune session)';
+      return { error: `Pair inconnu : "${payload.to}". Sessions enregistrées : ${known}`, status: 404 };
+    }
+    targets = [t];
+  }
+  const msg = {
+    id: newId(), from, kind,
+    subject: String(payload.subject || '').slice(0, 300),
+    body: String(payload.body).slice(0, LIMITS.msgBodyChars),
+    reply_to: payload.reply_to ? String(payload.reply_to).slice(0, 16) : null,
+    ts: nowISO(),
+  };
+  for (const t of targets) deliver(ch, t, { ...msg, to: t });
+  bump(ch);
+  return { id: msg.id, kind: msg.kind, targets };
+}
+
+// Requête de service (diff/fichier auto-répondus par le pair) — la réponse
+// est livrée via un callback : utilisable par l'API HTTP comme par le MCP.
+function requestService(ch, from, target, action, params, deliverResult) {
+  const t = sanitizeName(target);
+  if (!ch.sessions[t]) { deliverResult({ ok: false, error: `Pair inconnu : "${target}".` }); return; }
+  const request = {
+    id: newId(), from: sanitizeName(from),
+    action: String(action || '').slice(0, 32),
+    params: params || {}, ts: nowISO(),
+  };
+  const timer = setTimeout(() => {
+    ch.pendingService.delete(request.id);
+    const offline = !ch.servicePollers.has(t);
+    deliverResult({
+      ok: false,
+      error: offline
+        ? `${t} ne répond pas (sa session semble déconnectée du relais).`
+        : `${t} n'a pas répondu dans les ${LIMITS.serviceTimeoutMs / 1000}s.`,
+    });
+  }, LIMITS.serviceTimeoutMs);
+  ch.pendingService.set(request.id, { deliver: deliverResult, timer });
+
+  const poller = ch.servicePollers.get(t);
+  if (poller) {
+    ch.servicePollers.delete(t);
+    clearTimeout(poller.timer);
+    json(poller.res, 200, { request });
+  } else {
+    const queue = ch.serviceQueues.get(t) || [];
+    if (queue.length >= LIMITS.serviceQueue) {
+      clearTimeout(timer);
+      ch.pendingService.delete(request.id);
+      deliverResult({ ok: false, error: `File de service de ${t} pleine.` });
+      return;
+    }
+    queue.push(request);
+    ch.serviceQueues.set(t, queue);
+  }
+}
+
+// Lecture de boîte (avec attente optionnelle) — partagée HTTP/MCP.
+function readInboxNow(ch, name, consume) {
+  const box = ch.inboxes[name] || [];
+  if (!box.length) return null;
+  const msgs = box.slice();
+  if (consume) { ch.inboxes[name] = []; persist(ch); }
+  return msgs;
+}
+
+function waitInboxPromise(ch, name, consume, waitMs) {
+  return new Promise((resolve) => {
+    const first = readInboxNow(ch, name, consume);
+    if (first || !waitMs) return resolve(first || []);
+    addWaiter(ch, () => {
+      const msgs = readInboxNow(ch, name, consume);
+      if (msgs) { resolve(msgs); return true; }
+      return false;
+    }, waitMs, () => resolve([]));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// MCP distant (Streamable HTTP) — pour le connecteur claude.ai et tout client
+// MCP HTTP. Le canal claude-comm devient joignable par un Claude web/mobile,
+// qui y participe comme n'importe quelle session.
+// URL : /mcp/<jeton>[/<canal>[/<nom>]] — le jeton vit dans l'URL car les
+// connecteurs ne permettent pas d'en-têtes personnalisés.
+// ---------------------------------------------------------------------------
+
+const MCP_TOOLS = [
+  { name: 'comm_join',
+    description: "Rejoindre le canal de coordination claude-comm : annonce ton rôle et ta mission aux autres sessions Claude.",
+    inputSchema: { type: 'object', properties: {
+      role: { type: 'string', description: 'Ton rôle (ex: « assistant mobile »)' },
+      task: { type: 'string', description: 'Ce sur quoi tu démarres' } } } },
+  { name: 'comm_peers',
+    description: 'Lister les sessions Claude du canal et leur état live.',
+    inputSchema: { type: 'object', properties: {} } },
+  { name: 'comm_send',
+    description: "Envoyer un message à une session (ou à toutes avec to='*'). kinds : message, question, status_request, diff_request, alert. reply_to=<id> pour répondre.",
+    inputSchema: { type: 'object', properties: {
+      to: { type: 'string' }, body: { type: 'string' },
+      kind: { type: 'string', enum: ['message', 'question', 'status_request', 'diff_request', 'alert'] },
+      subject: { type: 'string' }, reply_to: { type: 'string' } },
+      required: ['to', 'body'] } },
+  { name: 'comm_inbox',
+    description: 'Relever tes messages. wait_seconds (max 20) attend l\'arrivée d\'un message.',
+    inputSchema: { type: 'object', properties: {
+      wait_seconds: { type: 'number', description: '0-20' } } } },
+  { name: 'comm_status_set',
+    description: 'Publier ton état live (working/blocked/done/idle/reviewing), tâche et progression.',
+    inputSchema: { type: 'object', properties: {
+      state: { type: 'string', enum: ['idle', 'working', 'blocked', 'done', 'reviewing'] },
+      task: { type: 'string' }, detail: { type: 'string' }, progress: { type: 'string' } },
+      required: ['state'] } },
+  { name: 'comm_status_get',
+    description: "Consulter l'état publié d'un pair (peer omis = tous).",
+    inputSchema: { type: 'object', properties: { peer: { type: 'string' } } } },
+  { name: 'comm_overview',
+    description: "Vue d'ensemble du canal : cap, jalons, tâches, sessions, revues, verrous.",
+    inputSchema: { type: 'object', properties: {} } },
+  { name: 'comm_task',
+    description: 'Tableau de tâches partagé : add (milestone/deps), list, next (claim atomique), claim, assign, update, done, release.',
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['add', 'list', 'next', 'claim', 'assign', 'update', 'done', 'release'] },
+      id: { type: 'string' }, title: { type: 'string' }, detail: { type: 'string' },
+      milestone: { type: 'string' }, deps: { type: 'array', items: { type: 'string' } },
+      to: { type: 'string' }, status: { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done'] },
+      note: { type: 'string' } },
+      required: ['action'] } },
+  { name: 'comm_plan',
+    description: 'Feuille de route partagée : goal (cap), add (jalon), update, done, list.',
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['goal', 'add', 'update', 'done', 'list'] },
+      text: { type: 'string' }, id: { type: 'string' }, title: { type: 'string' },
+      detail: { type: 'string' }, status: { type: 'string', enum: ['todo', 'active', 'done', 'dropped'] },
+      note: { type: 'string' } },
+      required: ['action'] } },
+  { name: 'comm_note',
+    description: 'Journal partagé de décisions/conventions : add (avec tags), list (filtre tag).',
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['add', 'list'] },
+      text: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } },
+      tag: { type: 'string' }, limit: { type: 'number' } },
+      required: ['action'] } },
+  { name: 'comm_lock',
+    description: "Verrous coopératifs de fichiers (évite d'éditer la même chose) : acquire, release, list.",
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['acquire', 'release', 'list'] },
+      paths: { type: 'array', items: { type: 'string' } }, reason: { type: 'string' } },
+      required: ['action'] } },
+  { name: 'comm_user',
+    description: "Fil avec l'utilisateur humain (dashboard) : post (lui écrire spontanément), claim (verrou de réponse sur ses messages « à tous »), reply, ask (question avec options), list.",
+    inputSchema: { type: 'object', properties: {
+      action: { type: 'string', enum: ['post', 'claim', 'reply', 'ask', 'list'] },
+      id: { type: 'string' }, body: { type: 'string' }, text: { type: 'string' },
+      options: { type: 'array', items: { type: 'string' } }, context: { type: 'string' } },
+      required: ['action'] } },
+  { name: 'comm_diff',
+    description: "Diff git du worktree d'un pair (répondu automatiquement par sa machine). mode : stat ou full.",
+    inputSchema: { type: 'object', properties: {
+      peer: { type: 'string' }, mode: { type: 'string', enum: ['stat', 'full'] } },
+      required: ['peer'] } },
+];
+
+const mcpSession = (s) => {
+  const on = Date.now() - Date.parse(s.last_seen || 0) < 90000 ? '🟢' : '⚪';
+  return `${on} ${s.name}${s.role ? ` (${s.role})` : ''} [${s.state || 'idle'}]` +
+    `${s.task ? ` — ${s.task}` : ''}${s.progress ? ` (${s.progress})` : ''}`;
+};
+const mcpTask = (t, db) => {
+  const icon = { todo: '⬜', in_progress: '🔵', done: '✅', blocked: '🟥' }[t.status] || '⬜';
+  let l = `${icon} ${t.id}${t.milestone ? `(${t.milestone})` : ''} ${t.title}${t.owner ? ` →${t.owner}` : ''}`;
+  if (t.deps && t.deps.length) {
+    const um = db ? unmetDeps(db, t) : [];
+    l += ` ⛓${t.deps.map((d) => (um.includes(d) ? `${d}⏳` : `${d}✓`)).join(',')}`;
+  }
+  return l;
+};
+const mcpMsg = (m) => `[${m.id}] ${m.from} (${m.kind}${m.subject ? ` · ${m.subject}` : ''}) : ${m.body}`;
+
+async function mcpToolCall(ch, actor, name, a) {
+  // heartbeat de l'appelant : il apparaît comme une session du canal
+  const prev = ch.sessions[actor] || { joined_at: nowISO(), role: 'claude (connecteur MCP)', state: 'idle' };
+  ch.sessions[actor] = { ...prev, name: actor, last_seen: nowISO(), last_model_seen: nowISO() };
+  bump(ch);
+
+  switch (name) {
+    case 'comm_join': {
+      const s = ch.sessions[actor];
+      if (a.role) s.role = String(a.role).slice(0, 200);
+      if (a.task) { s.task = String(a.task).slice(0, 300); s.state = 'working'; }
+      broadcast(ch, actor, 'notify', 'arrivée', `${actor} a rejoint le canal${a.role ? ` (${a.role})` : ''}.`);
+      bump(ch);
+      const others = Object.values(ch.sessions).filter((x) => x.name !== actor);
+      return `✅ Connecté au canal "${ch.name}" en tant que "${actor}".\n` +
+        (others.length ? `Pairs :\n${others.map(mcpSession).join('\n')}` : 'Aucun autre pair pour le moment.') +
+        `\nPense à relever comm_inbox régulièrement.`;
+    }
+    case 'comm_peers':
+      return Object.values(ch.sessions).map(mcpSession).join('\n') || 'Aucune session.';
+    case 'comm_send': {
+      const r = sendChannelMessage(ch, actor, a);
+      if (r.error) throw new Error(r.error);
+      return `📤 ${r.id} envoyé à ${r.targets.join(', ')}.`;
+    }
+    case 'comm_inbox': {
+      const wait = Math.min(Math.max(Number(a.wait_seconds) || 0, 0), 20);
+      const msgs = await waitInboxPromise(ch, actor, true, wait * 1000);
+      return msgs.length ? `📬 ${msgs.length} message(s) :\n${msgs.map(mcpMsg).join('\n')}` : '📭 Boîte vide.';
+    }
+    case 'comm_status_set': {
+      const s = ch.sessions[actor];
+      if (a.state) s.state = a.state;
+      for (const k of ['task', 'detail', 'progress']) if (a[k] !== undefined) s[k] = String(a[k]).slice(0, 500);
+      if (a.state === 'blocked' || a.state === 'done') {
+        broadcast(ch, actor, 'notify', `état : ${a.state}`, `${actor} est ${a.state}${a.task ? ` sur ${a.task}` : ''}.`);
+      }
+      bump(ch);
+      return `✅ État publié : ${a.state}${a.task ? ` — ${a.task}` : ''}`;
+    }
+    case 'comm_status_get': {
+      if (a.peer) {
+        const s = ch.sessions[sanitizeName(a.peer)];
+        if (!s) throw new Error(`Pair inconnu : "${a.peer}".`);
+        return mcpSession(s) + (s.detail ? `\ndétail : ${s.detail}` : '');
+      }
+      const others = Object.values(ch.sessions).filter((x) => x.name !== actor);
+      return others.length ? others.map(mcpSession).join('\n') : 'Aucun pair.';
+    }
+    case 'comm_overview':
+      return `🎯 ${ch.plan.goal || '(cap non défini)'}\n${standupDigest(statePayload(ch))}`;
+    case 'comm_task': {
+      const op = applyTaskAction(ch.tasks, actor, a);
+      notifyFromOp(ch, actor, op);
+      if (op.changed) bump(ch);
+      const r = op.result;
+      if (r.type === 'list') {
+        return ch.tasks.tasks.length
+          ? ch.tasks.tasks.map((t) => mcpTask(t, ch.tasks)).join('\n')
+          : 'Tableau vide (action=add pour créer).';
+      }
+      if (r.type === 'none') return 'Aucune tâche libre.';
+      if (r.type === 'done') return `✅ ${r.task.id} terminée.${r.unblocked.length ? ` ⛓ Débloquées : ${r.unblocked.join(', ')}.` : ''} ${r.remaining} restante(s).`;
+      return mcpTask(r.task, ch.tasks);
+    }
+    case 'comm_plan': {
+      const op = applyPlanAction(ch.plan, actor, a);
+      notifyFromOp(ch, actor, op);
+      if (op.changed) bump(ch);
+      const r = op.result;
+      if (r.type === 'plan') {
+        const icon = { todo: '⬜', active: '🔵', done: '✅', dropped: '🚫' };
+        return `🎯 ${r.plan.goal || '(cap non défini)'}\n` +
+          (r.plan.milestones.map((m) => `${icon[m.status] || '⬜'} ${m.id} ${m.title}`).join('\n') || 'Aucun jalon.');
+      }
+      if (r.type === 'goal') return `🎯 Cap fixé : ${r.goal}`;
+      return `✅ ${r.milestone.id} [${r.milestone.status}] ${r.milestone.title}`;
+    }
+    case 'comm_note': {
+      const op = applyNoteAction(ch.notes, actor, a);
+      notifyFromOp(ch, actor, op);
+      if (op.changed) bump(ch);
+      const r = op.result;
+      if (r.type === 'note') return `📝 Note ${r.note.id} ajoutée.`;
+      return r.notes.length
+        ? r.notes.map((n) => `[${n.by}] ${n.text}`).join('\n')
+        : 'Journal vide.';
+    }
+    case 'comm_lock': {
+      const op = applyLockAction(ch.locks, actor, a);
+      ch.locks = op.locks;
+      notifyFromOp(ch, actor, op);
+      if (op.changed) bump(ch);
+      const r = op.result;
+      if (r.type === 'conflict') return `🟥 Refusé : ${r.conflicts.map((c) => `${c.path} (par ${c.lock.owner})`).join(', ')}`;
+      if (r.type === 'acquired') return `🔒 Verrouillé : ${r.paths.join(', ')}`;
+      if (r.type === 'released') return r.paths.length ? `🔓 Libéré : ${r.paths.join(', ')}` : 'Rien à libérer.';
+      return r.locks.length ? r.locks.map((l) => `🔒 ${l.path} → ${l.owner}`).join('\n') : 'Aucun verrou.';
+    }
+    case 'comm_user': {
+      const op = applyUserAction(ch.user, actor, a);
+      notifyFromOp(ch, actor, op);
+      if (op.changed) bump(ch);
+      const r = op.result;
+      if (r.type === 'posted') return `📨 ${r.msg.id} publié dans le fil de l'utilisateur (visible dans son dashboard).`;
+      if (r.type === 'claimed_msg') return `✋ Claim sur ${r.msg.id} — rédige puis action=reply.\nMessage : ${r.msg.body}`;
+      if (r.type === 'replied') return `📤 Réponse à ${r.msg.id} publiée.`;
+      if (r.type === 'question') return `❔ ${r.question.id} posée à l'utilisateur (réponse diffusée à tous).`;
+      const msgs = r.msgs.map((m) => `${m.id}${m.from && m.from !== 'user' ? ` (de ${m.from})` : ''} [${m.status}] ${m.body.slice(0, 120)}`).join('\n');
+      const qs = r.questions.map((q) => `${q.id} [${q.status}] ${q.text}${q.answer ? ` → ${q.answer}` : ''}`).join('\n');
+      return `Fil :\n${msgs || '(vide)'}\nQuestions :\n${qs || '(aucune)'}`;
+    }
+    case 'comm_diff':
+      if (!a.peer) throw new Error('Paramètre requis : peer.');
+      return new Promise((resolve) => {
+        requestService(ch, actor, a.peer, 'diff', { mode: a.mode || 'stat' },
+          (r) => resolve(r.ok ? r.result : `❌ ${r.error}`));
+      });
+    default:
+      throw new Error(`Outil inconnu : ${name}`);
+  }
+}
+
+async function mcpRpcOne(ch, actor, m) {
+  const { id, method, params } = m || {};
+  const isRequest = id !== undefined && id !== null;
+  try {
+    if (method === 'initialize') {
+      return {
+        jsonrpc: '2.0', id,
+        result: {
+          protocolVersion: (params && params.protocolVersion) || '2025-03-26',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'claude-comm-relay', version: '1.0.0' },
+          instructions:
+            `Tu es connecté au canal "${ch.name}" de claude-comm sous le nom "${actor}". ` +
+            `D'autres sessions Claude collaborent ici en direct. Commence par comm_join, ` +
+            `regarde comm_overview, et relève comm_inbox régulièrement.`,
+        },
+      };
+    }
+    if (!isRequest) return null; // notification : pas de réponse
+    if (method === 'ping') return { jsonrpc: '2.0', id, result: {} };
+    if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: MCP_TOOLS } };
+    if (method === 'tools/call') {
+      try {
+        const text = await mcpToolCall(ch, actor, params && params.name, (params && params.arguments) || {});
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } };
+      } catch (e) {
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `❌ ${e.message}` }], isError: true } };
+      }
+    }
+    return { jsonrpc: '2.0', id, error: { code: -32601, message: `Méthode inconnue : ${method}` } };
+  } catch (e) {
+    return isRequest ? { jsonrpc: '2.0', id, error: { code: -32603, message: e.message } } : null;
+  }
+}
+
+async function mcpRpc(ch, actor, msg) {
+  if (Array.isArray(msg)) {
+    const replies = [];
+    for (const m of msg) {
+      const r = await mcpRpcOne(ch, actor, m);
+      if (r) replies.push(r);
+    }
+    return replies.length ? replies : null;
+  }
+  return mcpRpcOne(ch, actor, msg);
+}
+
 function notifyFromOp(ch, actor, op) {
   if (op && op.notify) broadcast(ch, actor, 'notify', op.notify.subject, op.notify.body);
 }
@@ -401,6 +761,28 @@ async function handle(req, res) {
     });
     return res.end(f.body);
   }
+
+  // --- MCP distant : /mcp/<jeton>[/<canal>[/<nom>]] -------------------------
+  if (u.pathname === '/mcp' || u.pathname.startsWith('/mcp/')) {
+    const segs = u.pathname.split('/').filter(Boolean); // mcp, jeton, canal?, nom?
+    if (!tokenOk(`Bearer ${decodeURIComponent(segs[1] || '')}`)) {
+      return json(res, 401, { jsonrpc: '2.0', id: null, error: {
+        code: -32000,
+        message: 'Jeton invalide. URL attendue : /mcp/<jeton>[/<canal>[/<nom>]]',
+      } });
+    }
+    const ch = getChannel(sanitizeName(decodeURIComponent(segs[2] || 'default')));
+    const actor = sanitizeName(decodeURIComponent(segs[3] || 'claude-connecteur'));
+    if (req.method === 'DELETE') { res.writeHead(200, CORS_HEADERS); return res.end(); }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST, DELETE, OPTIONS', ...CORS_HEADERS });
+      return res.end();
+    }
+    const rpcBody = await readBody(req);
+    const reply = await mcpRpc(ch, actor, rpcBody);
+    if (reply === null) { res.writeHead(202, CORS_HEADERS); return res.end(); }
+    return json(res, 200, reply);
+  }
   if (req.method === 'POST' && u.pathname === '/pair') {
     if (!PAIR_ENABLED || !pairing) return json(res, 404, { error: 'Appairage désactivé sur ce relais.' });
     if (rateLimited(req.socket.remoteAddress || '?')) return json(res, 429, { error: 'Débit trop élevé.' });
@@ -457,32 +839,9 @@ async function handle(req, res) {
 
   // --- messagerie ----------------------------------------------------------
   if (req.method === 'POST' && rest[0] === 'messages') {
-    const from = sanitizeName(body.from);
-    const kind = ['message', 'question', 'status_request', 'diff_request', 'alert', 'task', 'notify']
-      .includes(body.kind) ? body.kind : 'message';
-    if (!body.to || !body.body) return json(res, 400, { error: 'Paramètres requis : to, body.' });
-    let targets;
-    if (body.to === '*' || body.to === 'all') {
-      targets = Object.keys(ch.sessions).filter((n) => n !== from);
-      if (!targets.length) return json(res, 409, { error: 'Aucun pair connecté pour le broadcast.' });
-    } else {
-      const t = sanitizeName(body.to);
-      if (!ch.sessions[t]) {
-        const known = Object.keys(ch.sessions).join(', ') || '(aucune session)';
-        return json(res, 404, { error: `Pair inconnu : "${body.to}". Sessions enregistrées : ${known}` });
-      }
-      targets = [t];
-    }
-    const msg = {
-      id: newId(), from, kind,
-      subject: String(body.subject || '').slice(0, 300),
-      body: String(body.body).slice(0, LIMITS.msgBodyChars),
-      reply_to: body.reply_to ? String(body.reply_to).slice(0, 16) : null,
-      ts: nowISO(),
-    };
-    for (const t of targets) deliver(ch, t, { ...msg, to: t });
-    bump(ch);
-    return json(res, 200, { id: msg.id, kind: msg.kind, targets });
+    const r = sendChannelMessage(ch, sanitizeName(body.from), body);
+    if (r.error) return json(res, r.status, { error: r.error });
+    return json(res, 200, r);
   }
   if (req.method === 'GET' && rest[0] === 'inbox' && rest[1] && rest[2] === 'count') {
     return json(res, 200, { count: (ch.inboxes[sanitizeName(rest[1])] || []).length });
@@ -589,40 +948,8 @@ async function handle(req, res) {
 
   // --- requêtes de service (diff / fichier, auto-répondues par le pair) ----
   if (req.method === 'POST' && rest[0] === 'service' && rest[1]) {
-    const target = sanitizeName(rest[1]);
-    if (!ch.sessions[target]) return json(res, 404, { error: `Pair inconnu : "${rest[1]}".` });
-    const request = {
-      id: newId(), from: sanitizeName(body.from),
-      action: String(body.action || '').slice(0, 32),
-      params: body.params || {}, ts: nowISO(),
-    };
-    const timer = setTimeout(() => {
-      ch.pendingService.delete(request.id);
-      const offline = !ch.servicePollers.has(target);
-      json(res, 200, {
-        ok: false,
-        error: offline
-          ? `${target} ne répond pas (sa session semble déconnectée du relais).`
-          : `${target} n'a pas répondu dans les ${LIMITS.serviceTimeoutMs / 1000}s.`,
-      });
-    }, LIMITS.serviceTimeoutMs);
-    ch.pendingService.set(request.id, { res, timer });
-
-    const poller = ch.servicePollers.get(target);
-    if (poller) {
-      ch.servicePollers.delete(target);
-      clearTimeout(poller.timer);
-      json(poller.res, 200, { request });
-    } else {
-      const queue = ch.serviceQueues.get(target) || [];
-      if (queue.length >= LIMITS.serviceQueue) {
-        clearTimeout(timer);
-        ch.pendingService.delete(request.id);
-        return json(res, 200, { ok: false, error: `File de service de ${target} pleine.` });
-      }
-      queue.push(request);
-      ch.serviceQueues.set(target, queue);
-    }
+    requestService(ch, body.from, rest[1], body.action, body.params,
+      (result) => json(res, 200, result));
     return;
   }
   if (req.method === 'GET' && rest[0] === 'service-poll' && rest[1]) {
@@ -651,7 +978,7 @@ async function handle(req, res) {
     if (pending) {
       ch.pendingService.delete(String(body.id));
       clearTimeout(pending.timer);
-      json(pending.res, 200, { ok: body.ok !== false, result: body.result });
+      pending.deliver({ ok: body.ok !== false, result: body.result });
     }
     return json(res, 200, {});
   }

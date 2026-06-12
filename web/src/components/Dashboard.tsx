@@ -377,6 +377,10 @@ export default function Dashboard({
                 label="Machine entière 2/2 — outils comm_* dans tous les projets"
                 value="claude mcp add comm --scope user -- node /chemin/claude-communicator/server.js"
               />
+              <CopyRow
+                label="Connecteur claude.ai (web/mobile) — URL du serveur MCP distant"
+                value={`${hostInfo.publicUrl || hostInfo.wifiUrl}/mcp/${hostInfo.token}/${encodeURIComponent(channel)}/claude-web`}
+              />
               <p className="text-xs text-slate-500">
                 server.js vient du dépôt claude-communicator (git clone, aucun npm install).
                 Après l'étape « machine entière », il suffit de lancer <span className="font-mono text-slate-400">claude</span> —
