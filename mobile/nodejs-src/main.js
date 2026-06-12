@@ -119,35 +119,73 @@ async function startRelay(cfg) {
   catch (e) { starting = null; fail(`startRelay : ${e.message}`); throw e; }
 }
 
-// Tunnel public : tunnelmole d'abord (stable lors de nos tests terrain),
-// localtunnel en secours (loca.lt souffre de Bad Gateway par rafales).
-// Chaque tentative est bornée dans le temps pour ne jamais bloquer.
+// Tunnel public AUTO-CICATRISANT (constaté en test réel : le tunnel meurt
+// parfois en pleine utilisation et ne revenait jamais) :
+//  - localtunnel maintenu en boucle : à la mort du tunnel, reconnexion avec
+//    le MÊME sous-domaine → l'URL publique reste stable pour les agents et
+//    le connecteur claude.ai ;
+//  - tunnelmole en secours si localtunnel ne s'établit pas.
 const withTimeout = (p, ms, label) => Promise.race([
   p,
   new Promise((_r, rej) => setTimeout(() => rej(new Error(`${label} : délai dépassé (${ms / 1000}s)`)), ms)),
 ]);
 
 async function openTunnel(port) {
-  step('ouverture du tunnel (tunnelmole)…');
+  // première connexion : on attend le résultat pour le renvoyer à l'app ;
+  // ensuite la maintenance continue en arrière-plan.
+  const first = await connectTunnel(port, null);
+  if (first) {
+    maintainTunnel(port, first.subdomain, first.tunnel); // pas de await : boucle de fond
+    return;
+  }
+  // secours unique : tunnelmole
+  step('repli sur tunnelmole…');
   try {
     const { tunnelmole } = await import('tunnelmole');
     const url = await withTimeout(tunnelmole({ port }), 30000, 'tunnelmole');
     DIAG.info.publicUrl = String(url).replace(/^http:/, 'https:');
     DIAG.info.tunnelProvider = 'tunnelmole';
     step(`tunnel tunnelmole : ${DIAG.info.publicUrl}`);
-    return;
   } catch (e) { fail(`tunnelmole : ${e.message}`); }
+}
 
-  step('repli sur localtunnel…');
+async function connectTunnel(port, subdomain) {
   try {
     const localtunnel = require('localtunnel');
-    const tunnel = await withTimeout(localtunnel({ port, local_host: '127.0.0.1' }), 30000, 'localtunnel');
+    const opts = { port, local_host: '127.0.0.1' };
+    if (subdomain) opts.subdomain = subdomain;
+    const tunnel = await withTimeout(localtunnel(opts), 30000, 'localtunnel');
     DIAG.info.publicUrl = tunnel.url;
     DIAG.info.tunnelProvider = 'localtunnel';
-    step(`tunnel localtunnel : ${tunnel.url}`);
-    tunnel.on('close', () => { if (DIAG.info) DIAG.info.publicUrl = null; });
-  } catch (e) { fail(`localtunnel : ${e.message}`); }
+    step(`tunnel : ${tunnel.url}`);
+    let sub = subdomain;
+    try { sub = new (require('url').URL)(tunnel.url).hostname.split('.')[0]; } catch { /* garde l'ancien */ }
+    return { tunnel, subdomain: sub };
+  } catch (e) {
+    fail(`localtunnel${subdomain ? ` (${subdomain})` : ''} : ${e.message}`);
+    return null;
+  }
 }
+
+async function maintainTunnel(port, subdomain, tunnel) {
+  for (;;) {
+    // attend la mort du tunnel courant
+    await new Promise((resolve) => {
+      tunnel.on('close', resolve);
+      tunnel.on('error', resolve);
+    });
+    if (DIAG.info) DIAG.info.publicUrl = null;
+    fail('tunnel fermé — reconnexion automatique…');
+    // reconnexion (même sous-domaine si possible → URL stable)
+    for (;;) {
+      await sleep(5000);
+      const next = await connectTunnel(port, subdomain) || await connectTunnel(port, null);
+      if (next) { tunnel = next.tunnel; subdomain = next.subdomain; break; }
+    }
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- canal 1 : bridge natif (optionnel) ----------------------------------------
 
