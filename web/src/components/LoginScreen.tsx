@@ -2,7 +2,38 @@ import React, { useState } from 'react';
 import { Server, MonitorSmartphone, Radio, AlertCircle, LayoutTemplate, ArrowRight, Copy, Check } from 'lucide-react';
 import { Card, Input, Button } from './UI';
 import { ApiClient } from '../api';
-import { startEmbeddedHost, isNativeHostAvailable, HostInfo } from '../host';
+import {
+  startEmbeddedHost, isNativeHostAvailable, HostInfo,
+  keepAliveStatus, requestBatteryExemption, openVendorSettings, KeepAliveStatus,
+} from '../host';
+
+function BatteryAdvisor({ status }: { status: KeepAliveStatus }) {
+  if (status.ignoringBatteryOptimizations && !status.aggressive) return null;
+  return (
+    <div className="p-3 rounded-lg border border-amber-500/20 bg-amber-500/10 text-amber-200 text-xs space-y-2">
+      <p className="font-medium">
+        🔋 Pour que le relais survive écran éteint{status.vendorLabel ? ` (${status.vendorLabel} détecté — surcouche agressive)` : ''} :
+      </p>
+      {!status.ignoringBatteryOptimizations && (
+        <button onClick={() => requestBatteryExemption()}
+          className="w-full text-left px-3 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100">
+          1. Désactiver l'optimisation batterie pour claude-comm →
+        </button>
+      )}
+      {status.aggressive && (
+        <button onClick={() => openVendorSettings()}
+          className="w-full text-left px-3 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100">
+          {status.ignoringBatteryOptimizations ? '1' : '2'}. Autoriser le démarrage auto / arrière-plan →
+        </button>
+      )}
+      {status.aggressive && (
+        <p className="text-amber-200/70">
+          Et verrouille l'app dans les applis récentes (🔒 en maintenant sa carte).
+        </p>
+      )}
+    </div>
+  );
+}
 
 export function CopyRow({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
@@ -50,6 +81,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
   const [hostExpose, setHostExpose] = useState(false);
   const [hostStatus, setHostStatus] = useState<string>('');
   const [hostInfo, setHostInfo] = useState<any>(null);
+  const [kaStatus, setKaStatus] = useState<KeepAliveStatus | null>(null);
 
   const handleClientLogin = async () => {
     setError('');
@@ -94,6 +126,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       const info: HostInfo = await startEmbeddedHost(hostExpose, log);
       setHostInfo(info);
       setHostStatus('');
+      keepAliveStatus().then(setKaStatus).catch(() => {});
       // pas d'auto-redirection : l'utilisateur copie ses infos puis ouvre
       // le dashboard lui-même ; les infos restent accessibles ensuite (ℹ️)
       localStorage.setItem('cc_mode', 'host');
@@ -283,6 +316,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                     </p>
                   </div>
                 )}
+                {hostInfo && kaStatus && <BatteryAdvisor status={kaStatus} />}
                 {error && (
                   <div className="p-3 rounded-lg border border-rose-500/20 bg-rose-500/10 text-rose-400 text-sm flex gap-3">
                     <AlertCircle className="w-5 h-5 shrink-0" />

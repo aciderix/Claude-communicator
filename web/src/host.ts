@@ -109,6 +109,56 @@ async function startViaHttp(payload: { expose?: boolean }, log: (m: string) => v
   throw new Error('le relais ne confirme pas son démarrage');
 }
 
+// --- survie en arrière-plan : détection constructeur + raccourcis réglages
+
+export interface KeepAliveStatus {
+  manufacturer: string;
+  ignoringBatteryOptimizations: boolean;
+  /** constructeur connu pour tuer les apps en arrière-plan (MIUI & co) */
+  aggressive: boolean;
+  vendorLabel: string | null;
+}
+
+const AGGRESSIVE_VENDORS: Record<string, string> = {
+  xiaomi: 'MIUI (Xiaomi/Redmi/POCO)',
+  redmi: 'MIUI (Xiaomi/Redmi/POCO)',
+  poco: 'MIUI (Xiaomi/Redmi/POCO)',
+  huawei: 'EMUI (Huawei)',
+  honor: 'Magic UI (Honor)',
+  oppo: 'ColorOS (Oppo)',
+  realme: 'Realme UI',
+  vivo: 'Funtouch (Vivo)',
+  oneplus: 'OxygenOS (OnePlus)',
+  meizu: 'Flyme (Meizu)',
+};
+
+function keepAlivePlugin(): any {
+  return (window as any).Capacitor?.Plugins?.KeepAlive || null;
+}
+
+export async function keepAliveStatus(): Promise<KeepAliveStatus | null> {
+  const KA = keepAlivePlugin();
+  if (!KA || !KA.status) return null;
+  try {
+    const s = await KA.status();
+    const vendor = AGGRESSIVE_VENDORS[s.manufacturer] || AGGRESSIVE_VENDORS[s.brand] || null;
+    return {
+      manufacturer: s.manufacturer,
+      ignoringBatteryOptimizations: !!s.ignoringBatteryOptimizations,
+      aggressive: !!vendor,
+      vendorLabel: vendor,
+    };
+  } catch { return null; }
+}
+
+export async function requestBatteryExemption(): Promise<void> {
+  await keepAlivePlugin()?.requestBatteryExemption();
+}
+
+export async function openVendorSettings(): Promise<void> {
+  await keepAlivePlugin()?.openVendorSettings();
+}
+
 export async function startEmbeddedHost(
   expose: boolean,
   log: (m: string) => void,
