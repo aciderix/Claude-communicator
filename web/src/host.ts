@@ -114,16 +114,26 @@ export async function startEmbeddedHost(
   log: (m: string) => void,
 ): Promise<HostInfo> {
   const payload = { port: 8787, expose };
+  let info: HostInfo;
   try {
-    const info = await startViaBridge(payload, log);
+    info = await startViaBridge(payload, log);
     log('démarré via le bridge natif ✅');
-    return info;
   } catch (e: any) {
     // échec NATIF du moteur : la vraie cause prime sur le repli
     if (/^moteur Node :/.test(e.message)) throw e;
     log(`bridge KO (${e.message}) → repli sur le canal HTTP`);
+    info = await startViaHttp(payload, log);
+    log('démarré via le canal HTTP ✅');
   }
-  const info = await startViaHttp(payload, log);
-  log('démarré via le canal HTTP ✅');
+  // service de premier plan + wake lock : le relais survit à l'écran éteint
+  try {
+    const KA = (window as any).Capacitor?.Plugins?.KeepAlive;
+    if (KA) {
+      await KA.enable();
+      log('🔋 service de premier plan actif — le relais survit à l\'écran éteint');
+    }
+  } catch (e: any) {
+    log(`keep-alive indisponible : ${e.message || e}`);
+  }
   return info;
 }
