@@ -12,16 +12,26 @@ export default function ConversationThread({ msgs, sessions, onSend }: { msgs: M
   const [text, setText] = useState('');
   const [target, setTarget] = useState('*');
   const scrollEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-scroll to the bottom when messages change
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [msgs]);
 
+  // hauteur de saisie auto-extensible (jusqu'à ~6 lignes)
+  const autoGrow = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
+  };
+
   const handleSend = () => {
     if (text.trim()) {
       onSend(target, text.trim());
       setText('');
+      requestAnimationFrame(autoGrow);
     }
   };
 
@@ -86,27 +96,33 @@ export default function ConversationThread({ msgs, sessions, onSend }: { msgs: M
       </div>
 
       <div className="p-4 bg-slate-900 border-t border-slate-800/60 shrink-0">
-        <div className="flex items-center bg-slate-950 border border-slate-800 rounded-xl overflow-hidden focus-within:ring-1 focus-within:ring-blue-500/50 transition-shadow">
-          <select 
-            value={target} 
+        <div className="flex items-end bg-slate-950 border border-slate-800 rounded-xl overflow-hidden focus-within:ring-1 focus-within:ring-blue-500/50 transition-shadow">
+          <select
+            value={target}
             onChange={e => setTarget(e.target.value)}
-            className="bg-transparent text-slate-400 text-xs px-3 focus:outline-none border-none outline-none h-11 font-mono hover:text-slate-200 cursor-pointer"
+            className="bg-transparent text-slate-400 text-xs px-3 focus:outline-none border-none outline-none h-11 font-mono hover:text-slate-200 cursor-pointer shrink-0"
           >
             <option value="*">@Tous</option>
             {sessions.map(s => <option key={s.name} value={s.name}>@{s.name}</option>)}
           </select>
-          <div className="w-px h-6 bg-slate-800"></div>
-          <Input 
+          <div className="w-px h-6 bg-slate-800 self-center shrink-0"></div>
+          <textarea
+            ref={inputRef}
+            rows={1}
             value={text}
-            onChange={e => setText(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleSend(); }}
+            onChange={e => { setText(e.target.value); autoGrow(); }}
+            onKeyDown={e => {
+              // Entrée envoie (Maj+Entrée = retour à la ligne) ; sur mobile,
+              // le clavier insère des retours et le bouton envoie
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+            }}
             placeholder="Tapez un message..."
-            className="flex-1 border-none shadow-none focus:ring-0 rounded-none bg-transparent h-11 px-4 text-sm"
+            className="flex-1 min-w-0 resize-none border-none focus:ring-0 focus:outline-none rounded-none bg-transparent px-4 py-3 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 max-h-36 custom-scrollbar"
           />
-          <button 
-            onClick={handleSend} 
+          <button
+            onClick={handleSend}
             disabled={!text.trim()}
-            className="h-11 px-4 text-blue-500 hover:bg-blue-500/10 focus:outline-none disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+            className="h-11 px-4 text-blue-500 hover:bg-blue-500/10 focus:outline-none disabled:opacity-30 disabled:hover:bg-transparent transition-colors shrink-0"
           >
             <Send className="w-4 h-4" />
           </button>
