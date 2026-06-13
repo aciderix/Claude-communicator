@@ -2,18 +2,27 @@
 #  - bureau : Windows .exe, macOS .dmg, Linux .AppImage (Electron)
 #  - mobile : Android .apk (Capacitor + Node embarqué via nodejs-mobile)
 #
-# Déclenchement : manuellement (onglet Actions → build-app → Run workflow)
-# ou en poussant un tag v* (ex: v5.0.0). Les binaires sont disponibles
-# dans les artefacts du run (et attachés à la release si tag).
+# Déclenchement : manuellement (onglet Actions → build-app → Run workflow,
+# en choisissant la cible : android, desktop ou les deux) ou en poussant un
+# tag v* (ex: v5.0.0) qui construit tout. Les binaires sont disponibles dans
+# les artefacts du run (et attachés à la release si tag).
 name: build-app
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Que construire ?'
+        type: choice
+        default: both
+        options: [both, android, desktop]
   push:
     tags: ['v*']
 
 jobs:
   desktop:
+    # construit si : déclenché par un tag, OU cible "desktop"/"both" choisie.
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["desktop","both"]'), inputs.target)
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +57,8 @@ jobs:
             app/dist/*.AppImage
 
   android:
+    # construit si : déclenché par un tag, OU cible "android"/"both" choisie.
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["android","both"]'), inputs.target)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
