@@ -248,12 +248,16 @@ function respDecode(buf, offset) {
 function redisExec(url, commands) {
   return new Promise((resolve, reject) => {
     let u;
-    // tolerant : on accepte une valeur collee sans schema (host:port ou
-    // user:pass@host:port) en prefixant redis://
-    let raw = String(url).trim().replace(/^["']|["']$/g, '');
-    if (!/^rediss?:\/\//i.test(raw)) raw = 'redis://' + raw;
+    // tolerant aux collages approximatifs :
+    //  - si l'URL redis:// est presente quelque part (ex: on a colle
+    //    REDIS_URL="rediss://..." avec le prefixe/les guillemets), on l'extrait
+    //  - sinon, valeur sans schema (host:port) -> on prefixe redis://
+    let raw = String(url).trim();
+    const m = raw.match(/rediss?:\/\/[^\s"']+/i);
+    if (m) raw = m[0];
+    else { raw = raw.replace(/^["']|["']$/g, ''); if (raw) raw = 'redis://' + raw; }
     try { u = new URL(raw); }
-    catch { return reject(new Error(`REDIS_URL invalide (valeur recue : "${String(url).slice(0, 40)}…")`)); }
+    catch { return reject(new Error(`REDIS_URL invalide (debut : "${String(url).slice(0, 24)}…")`)); }
     const useTls = u.protocol === 'rediss:';
     const host = u.hostname;
     const port = Number(u.port) || 6379;
