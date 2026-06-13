@@ -139,9 +139,25 @@ function messagesContext(msgs) {
 
   switch (event) {
     case 'Stop':
-    case 'SubagentStop':
+    case 'SubagentStop': {
       await patchSession({ last_model_seen: nowISO() });
+      // REVEIL : avant que la session ne devienne inactive, si des messages
+      // de coordination sont arrives pendant son travail, on EMPECHE l'arret
+      // et on les injecte -> la session les traite au lieu de s'endormir avec
+      // des messages non lus. (Boucle bornee : les messages sont consommes,
+      // donc le prochain Stop sans message s'arrete normalement.)
+      if (input.stop_hook_active) return; // evite toute reentrance
+      const msgs = await collectMessages();
+      if (msgs.length) {
+        process.stdout.write(JSON.stringify({
+          decision: 'block',
+          reason: messagesContext(msgs) +
+            '\nTraite ces messages maintenant (reponds via comm_send/comm_user si besoin), ' +
+            'puis tu pourras t\'arreter.',
+        }));
+      }
       return;
+    }
 
     case 'PreCompact':
       await patchSession({ compacting: true });
