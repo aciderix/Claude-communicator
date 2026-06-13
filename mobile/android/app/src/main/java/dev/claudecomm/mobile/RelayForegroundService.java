@@ -41,7 +41,7 @@ public class RelayForegroundService extends Service {
     private Thread watcher;
     private volatile boolean running = false;
     private volatile String token = "";
-    private volatile int port = 8787;
+    private volatile String baseUrl = "http://127.0.0.1:8787";
     private volatile String channel = "default";
     private int lastAgentActivity = -1;
     private int lastOpenQ = -1;
@@ -57,7 +57,8 @@ public class RelayForegroundService extends Service {
         if (intent != null) {
             String t = intent.getStringExtra("token");
             if (t != null) token = t;
-            port = intent.getIntExtra("port", 8787);
+            String b = intent.getStringExtra("baseUrl");
+            if (b != null && !b.isEmpty()) baseUrl = b;
             String c = intent.getStringExtra("channel");
             if (c != null) channel = c;
         }
@@ -227,7 +228,7 @@ public class RelayForegroundService extends Service {
         if (token == null || token.isEmpty()) return null;
         HttpURLConnection conn = null;
         try {
-            URL url = new URL("http://127.0.0.1:" + port + "/c/" + channel + "/state");
+            URL url = new URL(baseUrl + "/c/" + channel + "/state");
             conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(4000);
             conn.setReadTimeout(8000);

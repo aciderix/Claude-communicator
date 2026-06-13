@@ -177,19 +177,25 @@ export async function startEmbeddedHost(
   }
   // service de premier plan + wake lock : le relais survit à l'écran éteint ;
   // le service tient aussi la notification de statut (sessions, messages)
-  // en interrogeant le relais nativement
+  // en interrogeant le relais nativement (ici en local : 127.0.0.1)
+  await startKeepAlive(`http://127.0.0.1:${info.port}`, info.secret,
+    localStorage.getItem('cc_channel') || 'default', log);
+  return info;
+}
+
+// Démarre le service de notifications natif, en visant N'IMPORTE QUEL relais
+// (local en mode hébergeur, distant/cloud en mode client) → notifications
+// dans les DEUX modes.
+export async function startKeepAlive(
+  baseUrl: string, token: string, channel: string,
+  log: (m: string) => void = () => {},
+): Promise<void> {
   try {
     const KA = (window as any).Capacitor?.Plugins?.KeepAlive;
-    if (KA) {
-      await KA.enable({
-        token: info.secret,
-        port: info.port,
-        channel: localStorage.getItem('cc_channel') || 'default',
-      });
-      log('🔋 service de premier plan actif — relais + notification de statut');
-    }
+    if (!KA) return; // web/desktop : pas de service natif
+    await KA.enable({ baseUrl, token, channel });
+    log('🔔 service de notifications actif (' + baseUrl + ')');
   } catch (e: any) {
     log(`keep-alive indisponible : ${e.message || e}`);
   }
-  return info;
 }

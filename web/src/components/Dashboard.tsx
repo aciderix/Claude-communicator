@@ -10,7 +10,7 @@ import ChannelSelect from './ChannelSelect';
 import { Button, Input, Card, Badge } from './UI';
 import { LogOut, Activity, Map, MessageSquareText, MessageSquareDashed, X, FolderTree, Radio, Info, Timer } from 'lucide-react';
 import { CopyRow } from './LoginScreen';
-import { startEmbeddedHost, isNativeHostAvailable } from '../host';
+import { startEmbeddedHost, isNativeHostAvailable, startKeepAlive } from '../host';
 
 export default function Dashboard({
   base,
@@ -55,6 +55,13 @@ export default function Dashboard({
     runningRef.current = true;
     versionRef.current = 0;
     setState(null);
+
+    // mode client (relais distant/cloud) : a la reouverture de l'app on
+    // arrive directement ici (LoginScreen saute), il faut donc (re)demarrer
+    // le service de notifications natif pointe sur le relais distant.
+    if (localStorage.getItem('cc_mode') === 'client' && base && !base.includes('127.0.0.1')) {
+      startKeepAlive(base, token, channel);
+    }
 
 
     const poll = async () => {

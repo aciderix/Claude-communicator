@@ -25,9 +25,9 @@ public class MainActivity extends BridgeActivity {
             try {
                 SharedPreferences p = getSharedPreferences("claude_comm", Context.MODE_PRIVATE);
                 String token = p.getString("token", "");
-                int port = p.getInt("port", 8787);
+                String baseUrl = p.getString("baseUrl", "http://127.0.0.1:8787");
                 if (token.isEmpty()) return;
-                URL url = new URL("http://127.0.0.1:" + port + "/native-log");
+                URL url = new URL(baseUrl + "/native-log");
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(3000);
                 conn.setReadTimeout(3000);

@@ -27,20 +27,24 @@ public class KeepAlivePlugin extends Plugin {
 
     @PluginMethod
     public void enable(PluginCall call) {
-        // identifiants du relais local sauvés pour le diagnostic natif distant
-        // (MainActivity les relit pour pousser ses logs vers /native-log)
+        // baseUrl = URL du relais a surveiller. Mode HEBERGEUR : http://127.0.0.1:port.
+        // Mode CLIENT (cloud Render, autre tel) : l'URL distante. Ainsi la
+        // notification de statut + les alertes fonctionnent dans LES DEUX modes.
+        String baseUrl = call.getString("baseUrl", "http://127.0.0.1:8787");
+        String token = call.getString("token", "");
+        String channel = call.getString("channel", "default");
+
+        // sauves pour le diagnostic natif distant (MainActivity les relit)
         getContext().getSharedPreferences("claude_comm", android.content.Context.MODE_PRIVATE)
             .edit()
-            .putString("token", call.getString("token", ""))
-            .putInt("port", call.getInt("port", 8787))
+            .putString("token", token)
+            .putString("baseUrl", baseUrl)
             .apply();
 
         Intent intent = new Intent(getContext(), RelayForegroundService.class);
-        // identifiants du relais local : la notification de statut interroge
-        // le relais nativement (indépendant du WebView suspendu)
-        intent.putExtra("token", call.getString("token", ""));
-        intent.putExtra("port", call.getInt("port", 8787));
-        intent.putExtra("channel", call.getString("channel", "default"));
+        intent.putExtra("token", token);
+        intent.putExtra("baseUrl", baseUrl);
+        intent.putExtra("channel", channel);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getContext().startForegroundService(intent);
         } else {

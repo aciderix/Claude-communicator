@@ -3,7 +3,7 @@ import { Server, MonitorSmartphone, Radio, AlertCircle, ArrowRight, Copy, Check,
 import { Card, Input, Button } from './UI';
 import { ApiClient } from '../api';
 import {
-  startEmbeddedHost, isNativeHostAvailable, HostInfo,
+  startEmbeddedHost, isNativeHostAvailable, HostInfo, startKeepAlive,
   keepAliveStatus, requestBatteryExemption, openVendorSettings, KeepAliveStatus,
 } from '../host';
 
@@ -99,6 +99,13 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       localStorage.setItem('cc_url', base);
       localStorage.setItem('cc_token', finalToken);
       localStorage.setItem('cc_channel', channel);
+      localStorage.setItem('cc_mode', 'client');
+
+      // mode client (cloud Render, autre tel) : démarre AUSSI le service de
+      // notifications natif, pointé sur le relais DISTANT → notifs dans les
+      // deux modes (c'est ce qui manquait : avant, notifs en mode hébergeur
+      // seulement).
+      await startKeepAlive(base, finalToken, channel);
 
       onLogin(base, finalToken, channel);
     } catch (err: any) {
