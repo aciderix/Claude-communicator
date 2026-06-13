@@ -248,7 +248,12 @@ function respDecode(buf, offset) {
 function redisExec(url, commands) {
   return new Promise((resolve, reject) => {
     let u;
-    try { u = new URL(url); } catch { return reject(new Error('REDIS_URL invalide')); }
+    // tolerant : on accepte une valeur collee sans schema (host:port ou
+    // user:pass@host:port) en prefixant redis://
+    let raw = String(url).trim().replace(/^["']|["']$/g, '');
+    if (!/^rediss?:\/\//i.test(raw)) raw = 'redis://' + raw;
+    try { u = new URL(raw); }
+    catch { return reject(new Error(`REDIS_URL invalide (valeur recue : "${String(url).slice(0, 40)}…")`)); }
     const useTls = u.protocol === 'rediss:';
     const host = u.hostname;
     const port = Number(u.port) || 6379;
