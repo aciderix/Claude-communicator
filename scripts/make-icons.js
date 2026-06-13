@@ -196,6 +196,28 @@ fs.writeFileSync(path.join(RES, 'values', 'ic_launcher_background.xml'),
 try { fs.unlinkSync(path.join(RES, 'drawable', 'ic_launcher_background.xml')); } catch { /* déjà absent */ }
 try { fs.unlinkSync(path.join(RES, 'drawable-v24', 'ic_launcher_foreground.xml')); } catch { /* déjà absent */ }
 
+// --- icône de notification (petite icône monochrome) -----------------------
+// Source dédiée : ic_notification.png (silhouette blanche sur transparent).
+// Android n'utilise que le canal alpha et teinte la forme lui-même, donc une
+// silhouette blanche est exactement ce qu'il faut. Densités d'une icône 24dp.
+const NOTIF_SRC = path.join(ROOT, 'ic_notification.png');
+if (fs.existsSync(NOTIF_SRC)) {
+  const n = decodePNG(fs.readFileSync(NOTIF_SRC));
+  const NOTIF = { mdpi: 24, hdpi: 36, xhdpi: 48, xxhdpi: 72, xxxhdpi: 96 };
+  for (const [d, size] of Object.entries(NOTIF)) {
+    const dir = path.join(RES, `drawable-${d}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ic_stat_notify.png'),
+      encodePNG(size, size, resize(n.px, n.width, n.height, size, size)));
+  }
+  // l'ancienne version vectorielle porterait le même nom de ressource : on la
+  // retire pour que seule la silhouette PNG soit utilisée.
+  try { fs.unlinkSync(path.join(RES, 'drawable', 'ic_stat_notify.xml')); } catch { /* déjà absent */ }
+  console.log('drawable-* : ic_stat_notify.png (notification)');
+} else {
+  console.log('ic_notification.png absent — icône de notif inchangée');
+}
+
 // desktop (Electron)
 
 // web (PWA)
