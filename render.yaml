@@ -1,10 +1,12 @@
 # Déploiement 1-clic du relais claude-comm sur Render :
 # https://render.com/deploy?repo=https://github.com/aciderix/claude-communicator
 #
-# Plan free : URL HTTPS stable, secret généré automatiquement, mais état
-# en mémoire (perdu quand l'instance s'endort) — suffisant pour coordonner
-# des sessions actives. Pour un état persistant, passez au plan starter et
-# décommentez le disque + ajoutez --data /var/data à startCommand.
+# Plan free : URL HTTPS stable, secret généré automatiquement. L'état est
+# en mémoire (perdu au sommeil de l'instance). Pour le rendre PERSISTANT en
+# restant 100 % gratuit : cree un Redis gratuit sur Upstash (upstash.com),
+# et renseigne les 2 variables UPSTASH_REDIS_REST_URL / _TOKEN ci-dessous
+# (depuis le dashboard Render → Environment). L'etat est alors sauvegarde
+# dehors et restaure au reveil. (Alternative payante : disque, voir plus bas.)
 services:
   - type: web
     name: claude-comm-relay
@@ -16,6 +18,12 @@ services:
     envVars:
       - key: CLAUDE_COMM_RELAY_SECRET
         generateValue: true
+      # Persistance gratuite via Upstash Redis (laisser vide = etat ephemere) :
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+    # Alternative payante (plan starter) : disque persistant.
     # disk:
     #   name: claude-comm-data
     #   mountPath: /var/data

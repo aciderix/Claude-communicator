@@ -43,9 +43,12 @@ public class RelayForegroundService extends Service {
     private volatile String token = "";
     private volatile String baseUrl = "http://127.0.0.1:8787";
     private volatile String channel = "default";
-    private int lastAgentActivity = -1;
-    private int lastOpenQ = -1;
-    private int lastPendingReviews = -1;
+    // Detection robuste aux resets du relais (ex: Render gratuit qui se vide) :
+    // on suit le DERNIER horodatage notifie plutot qu'un compteur (un compteur
+    // se desynchronise quand l'etat repart a zero). null = premier passage.
+    private String lastActivityTs = null;
+    private String lastQuestionTs = null;
+    private String lastReviewTs = null;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -141,9 +144,8 @@ public class RelayForegroundService extends Service {
                         int nbSessions = sessions == null ? 0 : sessions.length();
                         JSONObject user = state.optJSONObject("user");
                         int openForAgents = 0;
-                        int agentActivity = 0;
-                        String lastAuthor = null;
-                        String lastPreview = null;
+                        // suivi du nouvel evenement le plus recent (par horodatage)
+                        String newestActTs = null, newestAuthor = null, newestPreview = null;
                         if (user != null) {
                             JSONArray items = user.getJSONObject("msgs").getJSONArray("items");
                             for (int i = 0; i < items.length(); i++) {
@@ -151,66 +153,76 @@ public class RelayForegroundService extends Service {
                                 String from = m.optString("from", "user");
                                 if ("user".equals(from) && "open".equals(m.optString("status"))) openForAgents++;
                                 if (!"user".equals(from)) {
-                                    agentActivity++;
-                                    lastAuthor = from;
-                                    lastPreview = m.optString("body", "");
+                                    String ts = m.optString("ts", "");
+                                    if (newestActTs == null || ts.compareTo(newestActTs) > 0) {
+                                        newestActTs = ts; newestAuthor = from; newestPreview = m.optString("body", "");
+                                    }
                                 }
                                 JSONArray replies = m.optJSONArray("replies");
-                                if (replies != null) {
-                                    agentActivity += replies.length();
-                                    if (replies.length() > 0) {
-                                        JSONObject r = replies.getJSONObject(replies.length() - 1);
-                                        lastAuthor = r.optString("by", lastAuthor);
-                                        lastPreview = r.optString("body", lastPreview);
+                                for (int j = 0; replies != null && j < replies.length(); j++) {
+                                    JSONObject r = replies.getJSONObject(j);
+                                    String ts = r.optString("ts", "");
+                                    if (newestActTs == null || ts.compareTo(newestActTs) > 0) {
+                                        newestActTs = ts; newestAuthor = r.optString("by", "session"); newestPreview = r.optString("body", "");
                                     }
                                 }
                             }
                             JSONArray qs = user.getJSONObject("questions").getJSONArray("items");
                             int openQ = 0;
-                            JSONObject newestOpenQ = null;
+                            String newestQTs = null; JSONObject newestOpenQ = null;
                             for (int i = 0; i < qs.length(); i++) {
                                 JSONObject q = qs.getJSONObject(i);
-                                if ("open".equals(q.optString("status"))) { openQ++; newestOpenQ = q; }
+                                if ("open".equals(q.optString("status"))) {
+                                    openQ++;
+                                    String ts = q.optString("ts", "");
+                                    if (newestQTs == null || ts.compareTo(newestQTs) > 0) { newestQTs = ts; newestOpenQ = q; }
+                                }
                             }
                             String text = nbSessions + " session(s)"
                                 + (openQ > 0 ? " · " + openQ + " question(s) pour toi" : "")
                                 + (openForAgents > 0 ? " · " + openForAgents + " message(s) sans réponse" : "");
                             getSystemService(NotificationManager.class)
                                 .notify(NOTIFICATION_ID, buildStatusNotification(text));
-                            // alerte dédiée : nouveau message d'une session
-                            if (lastAgentActivity >= 0 && agentActivity > lastAgentActivity && lastAuthor != null) {
-                                String preview = lastPreview == null ? "" :
-                                    (lastPreview.length() > 80 ? lastPreview.substring(0, 80) + "…" : lastPreview);
-                                notifyNewActivity("💬 " + lastAuthor, preview, MSG_NOTIFICATION_ID);
+                            // alerte : message plus recent que le dernier notifie (robuste aux resets)
+                            if (newestActTs != null) {
+                                if (lastActivityTs != null && newestActTs.compareTo(lastActivityTs) > 0 && newestAuthor != null) {
+                                    String preview = newestPreview == null ? "" :
+                                        (newestPreview.length() > 80 ? newestPreview.substring(0, 80) + "…" : newestPreview);
+                                    notifyNewActivity("💬 " + newestAuthor, preview, MSG_NOTIFICATION_ID);
+                                }
+                                if (lastActivityTs == null || newestActTs.compareTo(lastActivityTs) > 0) lastActivityTs = newestActTs;
                             }
-                            lastAgentActivity = agentActivity;
-                            // alerte dédiée : nouvelle question qui attend TA réponse
-                            if (lastOpenQ >= 0 && openQ > lastOpenQ && newestOpenQ != null) {
-                                notifyNewActivity("❓ Question de " + newestOpenQ.optString("from", "une session"),
-                                    newestOpenQ.optString("text", ""), Q_NOTIFICATION_ID);
+                            // alerte : nouvelle question qui attend TA reponse
+                            if (newestQTs != null && newestOpenQ != null) {
+                                if (lastQuestionTs != null && newestQTs.compareTo(lastQuestionTs) > 0) {
+                                    notifyNewActivity("❓ Question de " + newestOpenQ.optString("from", "une session"),
+                                        newestOpenQ.optString("text", ""), Q_NOTIFICATION_ID);
+                                }
+                                if (lastQuestionTs == null || newestQTs.compareTo(lastQuestionTs) > 0) lastQuestionTs = newestQTs;
                             }
-                            lastOpenQ = openQ;
                         }
 
-                        // alerte dédiée : revue en attente (travail fini à valider)
+                        // alerte : revue en attente (travail fini a valider)
                         JSONObject reviews = state.optJSONObject("reviews");
                         if (reviews != null) {
                             JSONArray items = reviews.optJSONArray("items");
-                            int pending = 0;
-                            JSONObject newestPending = null;
+                            String newestRTs = null; JSONObject newestPending = null;
                             for (int i = 0; items != null && i < items.length(); i++) {
                                 JSONObject rv = items.getJSONObject(i);
                                 String st = rv.optString("status");
                                 if ("pending".equals(st) || "changes_requested".equals(st)) {
-                                    pending++; newestPending = rv;
+                                    String ts = rv.optString("updated_at", rv.optString("created_at", ""));
+                                    if (newestRTs == null || ts.compareTo(newestRTs) > 0) { newestRTs = ts; newestPending = rv; }
                                 }
                             }
-                            if (lastPendingReviews >= 0 && pending > lastPendingReviews && newestPending != null) {
-                                notifyNewActivity("🔍 Revue : " + newestPending.optString("from", "?")
-                                        + " → " + newestPending.optString("to", "?"),
-                                    newestPending.optString("title", "travail à valider"), R_NOTIFICATION_ID);
+                            if (newestRTs != null && newestPending != null) {
+                                if (lastReviewTs != null && newestRTs.compareTo(lastReviewTs) > 0) {
+                                    notifyNewActivity("🔍 Revue : " + newestPending.optString("from", "?")
+                                            + " → " + newestPending.optString("to", "?"),
+                                        newestPending.optString("title", "travail à valider"), R_NOTIFICATION_ID);
+                                }
+                                if (lastReviewTs == null || newestRTs.compareTo(lastReviewTs) > 0) lastReviewTs = newestRTs;
                             }
-                            lastPendingReviews = pending;
                         }
                     } else {
                         getSystemService(NotificationManager.class)

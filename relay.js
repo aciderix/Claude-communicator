@@ -64,6 +64,14 @@ const PORT = Number(ARGS.port || process.env.PORT || 8787);
 const HOST = ARGS.host || process.env.CLAUDE_COMM_RELAY_HOST || '127.0.0.1';
 const DATA = ARGS.data ? path.resolve(ARGS.data) : null;
 
+// Persistance externe optionnelle via Upstash Redis (REST) : permet de
+// survivre aux redemarrages/sommeils sur un hote SANS disque (ex: Render
+// gratuit). Active si les 2 variables d'env sont fournies.
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const UPSTASH_KEY = process.env.UPSTASH_KEY || 'claude-comm:state';
+const UPSTASH_ON = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
 let SECRET = ARGS.secret || process.env.CLAUDE_COMM_RELAY_SECRET || '';
 let secretGenerated = false;
 if (!SECRET) {
@@ -138,7 +146,30 @@ function getChannel(name) {
 }
 
 // Persistance optionnelle (--data <dir>) : l'état survit aux redémarrages.
+// Etat serialisable d'un canal (sans les structures runtime : waiters,
+// pollers, files de service, timers).
+function serializeChannel(ch) {
+  return {
+    sessions: ch.sessions, inboxes: ch.inboxes,
+    tasks: ch.tasks, locks: ch.locks, notes: ch.notes,
+    plan: ch.plan, reviews: ch.reviews,
+    user: ch.user, config: ch.config, version: ch.version,
+  };
+}
+
+function deserializeInto(ch, d) {
+  Object.assign(ch, {
+    sessions: d.sessions || {}, inboxes: d.inboxes || {},
+    tasks: d.tasks || emptyTasks(), locks: d.locks || [],
+    notes: d.notes || [], plan: d.plan || emptyPlan(),
+    reviews: d.reviews || emptyReviews(),
+    user: d.user || emptyUser(), config: d.config || emptyConfig(),
+    version: (d.version || 1) + 1,
+  });
+}
+
 function persist(ch) {
+  upstashSave();
   if (!DATA || ch._saveTimer) return;
   ch._saveTimer = setTimeout(() => {
     ch._saveTimer = null;
@@ -146,15 +177,52 @@ function persist(ch) {
       fs.mkdirSync(DATA, { recursive: true });
       const f = path.join(DATA, `${ch.name}.json`);
       const tmp = `${f}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({
-        sessions: ch.sessions, inboxes: ch.inboxes,
-        tasks: ch.tasks, locks: ch.locks, notes: ch.notes,
-        plan: ch.plan, reviews: ch.reviews,
-        user: ch.user, config: ch.config, version: ch.version,
-      }));
+      fs.writeFileSync(tmp, JSON.stringify(serializeChannel(ch)));
       fs.renameSync(tmp, f);
     } catch (e) { console.error(`persistance ${ch.name}:`, e.message); }
   }, 500);
+}
+
+// --- Upstash Redis (REST) : un seul appel commande ---------------------------
+async function upstashCmd(cmd) {
+  const r = await fetch(UPSTASH_URL, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${UPSTASH_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify(cmd),
+    signal: AbortSignal.timeout(8000),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d.result;
+}
+
+// Sauvegarde debouncee de TOUS les canaux dans une seule cle Upstash.
+let upstashTimer = null;
+function upstashSave() {
+  if (!UPSTASH_ON || upstashTimer) return;
+  upstashTimer = setTimeout(async () => {
+    upstashTimer = null;
+    try {
+      const all = {};
+      for (const [name, ch] of channels) all[name] = serializeChannel(ch);
+      await upstashCmd(['SET', UPSTASH_KEY, JSON.stringify(all)]);
+    } catch (e) { console.error('upstash save:', e.message); }
+  }, 2000);
+}
+
+async function upstashLoad() {
+  if (!UPSTASH_ON) return;
+  try {
+    const raw = await upstashCmd(['GET', UPSTASH_KEY]);
+    if (!raw) { console.error('Upstash : aucun etat sauvegarde (premier demarrage).'); return; }
+    const all = JSON.parse(raw);
+    for (const [name, d] of Object.entries(all)) {
+      const ch = newChannel(sanitizeName(name));
+      deserializeInto(ch, d);
+      channels.set(ch.name, ch);
+    }
+    console.error(`Etat restaure depuis Upstash : ${channels.size} canal/canaux.`);
+  } catch (e) { console.error('upstash load:', e.message); }
 }
 
 function loadPersisted() {
@@ -166,14 +234,7 @@ function loadPersisted() {
       const d = JSON.parse(fs.readFileSync(path.join(DATA, f), 'utf8'));
       const name = sanitizeName(f.replace(/\.json$/, ''));
       const ch = newChannel(name);
-      Object.assign(ch, {
-        sessions: d.sessions || {}, inboxes: d.inboxes || {},
-        tasks: d.tasks || emptyTasks(), locks: d.locks || [],
-        notes: d.notes || [], plan: d.plan || emptyPlan(),
-        reviews: d.reviews || emptyReviews(),
-        user: d.user || emptyUser(), config: d.config || emptyConfig(),
-        version: (d.version || 1) + 1,
-      });
+      deserializeInto(ch, d);
       channels.set(name, ch);
     } catch (e) { console.error(`chargement ${f}:`, e.message); }
   }
@@ -1004,6 +1065,9 @@ async function handle(req, res) {
 // ---------------------------------------------------------------------------
 
 loadPersisted();
+// Restauration Upstash (async) : avant l'ecoute si possible. Non bloquant si
+// Upstash est lent — l'etat sera la dans la foulee.
+const upstashReady = upstashLoad();
 
 // Standup périodique optionnel : digest compact (généré sans LLM) diffusé
 // aux sessions seulement si l'état a changé depuis le précédent.
@@ -1067,6 +1131,10 @@ server.listen(PORT, HOST, () => {
   } else if (!ARGS['tls-cert']) {
     console.error('⚠️  Exposé sans TLS : place un reverse proxy HTTPS devant, ou utilise --tls-cert/--tls-key.');
   }
-  if (DATA) console.error(`Persistance : ${DATA}`);
+  if (DATA) console.error(`Persistance disque : ${DATA}`);
+  if (UPSTASH_ON) {
+    console.error('Persistance Upstash : activee.');
+    upstashReady.catch(() => {});
+  }
   newPairCode();
 });
