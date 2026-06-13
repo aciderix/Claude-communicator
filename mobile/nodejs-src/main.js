@@ -145,13 +145,30 @@ const withTimeout = (p, ms, label) => Promise.race([
   new Promise((_r, rej) => setTimeout(() => rej(new Error(`${label} : délai dépassé (${ms / 1000}s)`)), ms)),
 ]);
 
-async function openTunnel(port, subdomain) {
-  // première connexion sur le sous-domaine FIXE → URL stable. Si pris (rare,
-  // collision improbable), repli sur sous-domaine aléatoire pour ne pas
-  // bloquer ; ensuite la maintenance continue en arrière-plan.
-  const first = await connectTunnel(port, subdomain) || await connectTunnel(port, null);
-  if (first) {
-    maintainTunnel(port, first.subdomain, first.tunnel); // pas de await : boucle de fond
+async function openTunnel(port, preferred) {
+  // Sous-domaine FIXE = URL stable. PROBLEME observe : apres un redemarrage
+  // rapide, loca.lt garde encore l'ancienne reservation du sous-domaine et
+  // en attribue un ALEATOIRE sans erreur -> URL changee. Parade : on tente
+  // le sous-domaine prefere plusieurs fois (l'ancienne reservation expire en
+  // ~30-60 s) ; si toujours pris, on demarre sur l'aleatoire (utilisable de
+  // suite) et la maintenance continue de le reclamer en fond.
+  let result = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const r = await connectTunnel(port, preferred);
+    if (!r) break; // echec total -> tunnelmole
+    if (r.subdomain === preferred) { result = r; break; } // on l'a !
+    if (attempt < 3) {
+      step(`sous-domaine ${preferred} encore reserve, nouvelle tentative dans 10 s…`);
+      try { r.tunnel.close(); } catch { /* ignore */ }
+      await sleep(10000);
+    } else {
+      result = r; // on accepte l'aleatoire apres les tentatives
+    }
+  }
+  if (result) {
+    adoptTunnel(result);
+    // on passe le sous-domaine PREFERE : la maintenance le reclamera
+    maintainTunnel(port, preferred, result.tunnel, result.subdomain);
     return;
   }
   // secours unique : tunnelmole
@@ -165,39 +182,72 @@ async function openTunnel(port, subdomain) {
   } catch (e) { fail(`tunnelmole : ${e.message}`); }
 }
 
+// Ouvre un tunnel SANS effet de bord sur DIAG (le sous-domaine reel peut
+// differer du demande) : l'appelant decide quoi en faire.
 async function connectTunnel(port, subdomain) {
   try {
     const localtunnel = require('localtunnel');
     const opts = { port, local_host: '127.0.0.1' };
     if (subdomain) opts.subdomain = subdomain;
     const tunnel = await withTimeout(localtunnel(opts), 30000, 'localtunnel');
-    DIAG.info.publicUrl = tunnel.url;
-    DIAG.info.tunnelProvider = 'localtunnel';
-    step(`tunnel : ${tunnel.url}`);
     let sub = subdomain;
     try { sub = new (require('url').URL)(tunnel.url).hostname.split('.')[0]; } catch { /* garde l'ancien */ }
-    return { tunnel, subdomain: sub };
+    return { tunnel, subdomain: sub, url: tunnel.url };
   } catch (e) {
     fail(`localtunnel${subdomain ? ` (${subdomain})` : ''} : ${e.message}`);
     return null;
   }
 }
 
-async function maintainTunnel(port, subdomain, tunnel) {
+function adoptTunnel(r) {
+  DIAG.info.publicUrl = r.url;
+  DIAG.info.tunnelProvider = 'localtunnel';
+  step(`tunnel : ${r.url}`);
+}
+
+async function maintainTunnel(port, preferred, tunnel, current) {
+  // tâche de fond : si on n'est PAS sur le sous-domaine préféré, on tente de
+  // le récupérer périodiquement → l'URL converge vers l'URL STABLE configurée.
+  let reclaimTimer = null;
+  const scheduleReclaim = () => {
+    if (current === preferred || reclaimTimer) return;
+    reclaimTimer = setInterval(async () => {
+      if (current === preferred) { clearInterval(reclaimTimer); reclaimTimer = null; return; }
+      const r = await connectTunnel(port, preferred);
+      if (r && r.subdomain === preferred) {
+        try { tunnel.close(); } catch { /* ignore */ }
+        tunnel = r.tunnel; current = preferred;
+        adoptTunnel(r);
+        step('URL stable récupérée.');
+        clearInterval(reclaimTimer); reclaimTimer = null;
+        armCloseHandler();
+      } else if (r) {
+        try { r.tunnel.close(); } catch { /* ignore */ } // pas encore libre
+      }
+    }, 90000);
+  };
+
+  let resolveClose;
+  const armCloseHandler = () => {
+    const p = new Promise((res) => { resolveClose = res; });
+    tunnel.on('close', () => resolveClose());
+    tunnel.on('error', () => resolveClose());
+    return p;
+  };
+
+  scheduleReclaim();
   for (;;) {
-    // attend la mort du tunnel courant
-    await new Promise((resolve) => {
-      tunnel.on('close', resolve);
-      tunnel.on('error', resolve);
-    });
+    await armCloseHandler();
+    if (reclaimTimer) { clearInterval(reclaimTimer); reclaimTimer = null; }
     if (DIAG.info) DIAG.info.publicUrl = null;
     fail('tunnel fermé — reconnexion automatique…');
-    // reconnexion (même sous-domaine si possible → URL stable)
+    // reconnexion : on vise d'abord le sous-domaine préféré
     for (;;) {
       await sleep(5000);
-      const next = await connectTunnel(port, subdomain) || await connectTunnel(port, null);
-      if (next) { tunnel = next.tunnel; subdomain = next.subdomain; break; }
+      const next = await connectTunnel(port, preferred) || await connectTunnel(port, null);
+      if (next) { tunnel = next.tunnel; current = next.subdomain; adoptTunnel(next); break; }
     }
+    scheduleReclaim();
   }
 }
 
