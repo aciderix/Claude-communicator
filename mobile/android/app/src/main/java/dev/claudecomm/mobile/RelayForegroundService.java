@@ -33,6 +33,7 @@ public class RelayForegroundService extends Service {
     private static final String CHANNEL_MSG_ID = "claude_comm_messages";
     private static final int NOTIFICATION_ID = 424242;
     private static final int MSG_NOTIFICATION_ID = 424243;
+    private static final int Q_NOTIFICATION_ID = 424244;
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -42,6 +43,7 @@ public class RelayForegroundService extends Service {
     private volatile int port = 8787;
     private volatile String channel = "default";
     private int lastAgentActivity = -1;
+    private int lastOpenQ = -1;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -106,20 +108,20 @@ public class RelayForegroundService extends Service {
             .build();
     }
 
-    private void notifyNewActivity(String author, String preview) {
+    private void notifyNewActivity(String title, String preview, int id) {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent pi = PendingIntent.getActivity(this, 1, open,
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_MSG_ID)
             : new Notification.Builder(this);
-        Notification n = b.setContentTitle("💬 " + author)
+        Notification n = b.setContentTitle(title)
             .setContentText(preview)
             .setSmallIcon(getResources().getIdentifier("ic_stat_notify", "drawable", getPackageName()))
             .setContentIntent(pi)
             .setAutoCancel(true)
             .build();
-        getSystemService(NotificationManager.class).notify(MSG_NOTIFICATION_ID, n);
+        getSystemService(NotificationManager.class).notify(id, n);
     }
 
     /** Interroge le relais local toutes les 20 s : met à jour la notification
@@ -162,20 +164,29 @@ public class RelayForegroundService extends Service {
                             }
                             JSONArray qs = user.getJSONObject("questions").getJSONArray("items");
                             int openQ = 0;
+                            JSONObject newestOpenQ = null;
                             for (int i = 0; i < qs.length(); i++) {
-                                if ("open".equals(qs.getJSONObject(i).optString("status"))) openQ++;
+                                JSONObject q = qs.getJSONObject(i);
+                                if ("open".equals(q.optString("status"))) { openQ++; newestOpenQ = q; }
                             }
                             String text = nbSessions + " session(s)"
                                 + (openQ > 0 ? " · " + openQ + " question(s) pour toi" : "")
                                 + (openForAgents > 0 ? " · " + openForAgents + " message(s) sans réponse" : "");
                             getSystemService(NotificationManager.class)
                                 .notify(NOTIFICATION_ID, buildStatusNotification(text));
+                            // alerte dédiée : nouveau message d'une session
                             if (lastAgentActivity >= 0 && agentActivity > lastAgentActivity && lastAuthor != null) {
                                 String preview = lastPreview == null ? "" :
                                     (lastPreview.length() > 80 ? lastPreview.substring(0, 80) + "…" : lastPreview);
-                                notifyNewActivity(lastAuthor, preview);
+                                notifyNewActivity("💬 " + lastAuthor, preview, MSG_NOTIFICATION_ID);
                             }
                             lastAgentActivity = agentActivity;
+                            // alerte dédiée : nouvelle question qui attend TA réponse
+                            if (lastOpenQ >= 0 && openQ > lastOpenQ && newestOpenQ != null) {
+                                notifyNewActivity("❓ Question de " + newestOpenQ.optString("from", "une session"),
+                                    newestOpenQ.optString("text", ""), Q_NOTIFICATION_ID);
+                            }
+                            lastOpenQ = openQ;
                         }
                     } else {
                         getSystemService(NotificationManager.class)
