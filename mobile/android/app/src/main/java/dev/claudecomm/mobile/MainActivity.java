@@ -1,5 +1,8 @@
 package dev.claudecomm.mobile;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebView;
@@ -12,6 +15,15 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(KeepAlivePlugin.class);
         super.onCreate(savedInstanceState);
+
+        // Android 13+ : la permission notifications doit être demandée à
+        // l'exécution, sinon la notification de statut (sessions, messages)
+        // échoue silencieusement.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                   != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{ Manifest.permission.POST_NOTIFICATIONS }, 1001);
+        }
 
         // Android peut tuer le processus de rendu du WebView en arrière-plan :
         // sans gestion, l'app revient sur un écran noir définitif.
