@@ -34,6 +34,7 @@ public class RelayForegroundService extends Service {
     private static final int NOTIFICATION_ID = 424242;
     private static final int MSG_NOTIFICATION_ID = 424243;
     private static final int Q_NOTIFICATION_ID = 424244;
+    private static final int R_NOTIFICATION_ID = 424245;
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -44,6 +45,7 @@ public class RelayForegroundService extends Service {
     private volatile String channel = "default";
     private int lastAgentActivity = -1;
     private int lastOpenQ = -1;
+    private int lastPendingReviews = -1;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -187,6 +189,27 @@ public class RelayForegroundService extends Service {
                                     newestOpenQ.optString("text", ""), Q_NOTIFICATION_ID);
                             }
                             lastOpenQ = openQ;
+                        }
+
+                        // alerte dédiée : revue en attente (travail fini à valider)
+                        JSONObject reviews = state.optJSONObject("reviews");
+                        if (reviews != null) {
+                            JSONArray items = reviews.optJSONArray("items");
+                            int pending = 0;
+                            JSONObject newestPending = null;
+                            for (int i = 0; items != null && i < items.length(); i++) {
+                                JSONObject rv = items.getJSONObject(i);
+                                String st = rv.optString("status");
+                                if ("pending".equals(st) || "changes_requested".equals(st)) {
+                                    pending++; newestPending = rv;
+                                }
+                            }
+                            if (lastPendingReviews >= 0 && pending > lastPendingReviews && newestPending != null) {
+                                notifyNewActivity("🔍 Revue : " + newestPending.optString("from", "?")
+                                        + " → " + newestPending.optString("to", "?"),
+                                    newestPending.optString("title", "travail à valider"), R_NOTIFICATION_ID);
+                            }
+                            lastPendingReviews = pending;
                         }
                     } else {
                         getSystemService(NotificationManager.class)
