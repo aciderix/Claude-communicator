@@ -27,6 +27,14 @@ public class KeepAlivePlugin extends Plugin {
 
     @PluginMethod
     public void enable(PluginCall call) {
+        // identifiants du relais local sauvés pour le diagnostic natif distant
+        // (MainActivity les relit pour pousser ses logs vers /native-log)
+        getContext().getSharedPreferences("claude_comm", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString("token", call.getString("token", ""))
+            .putInt("port", call.getInt("port", 8787))
+            .apply();
+
         Intent intent = new Intent(getContext(), RelayForegroundService.class);
         // identifiants du relais local : la notification de statut interroge
         // le relais nativement (indépendant du WebView suspendu)

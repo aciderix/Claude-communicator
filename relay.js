@@ -104,6 +104,7 @@ const LIMITS = {
 // ---------------------------------------------------------------------------
 
 const channels = new Map();
+const NATIVE_LOG = []; // journal de diagnostic natif (Android), lu à distance
 
 function newChannel(name) {
   return {
@@ -805,6 +806,18 @@ async function handle(req, res) {
   }
   if (req.method === 'GET' && u.pathname === '/pair-code') {
     return json(res, 200, { code: PAIR_ENABLED && pairing ? pairing.code : null });
+  }
+  // Journal de diagnostic NATIF (Android) : l'app y pousse ses événements
+  // (retour au premier plan, écran noir...) ; lisible à distance via le
+  // tunnel — débogage natif sans PC ni ADB.
+  if (req.method === 'POST' && u.pathname === '/native-log') {
+    const body = await readBody(req);
+    NATIVE_LOG.push(`${nowISO()} ${String(body.line || '').slice(0, 500)}`);
+    if (NATIVE_LOG.length > 200) NATIVE_LOG.shift();
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === 'GET' && u.pathname === '/native-log') {
+    return json(res, 200, { lines: NATIVE_LOG });
   }
   const ip = req.socket.remoteAddress || '?';
   if (rateLimited(ip)) return json(res, 429, { error: 'Débit trop élevé, réessaie dans une minute.' });

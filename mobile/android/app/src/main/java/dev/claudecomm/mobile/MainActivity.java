@@ -1,6 +1,8 @@
 package dev.claudecomm.mobile;
 
 import android.Manifest;
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -9,7 +11,41 @@ import android.webkit.WebView;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
 
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
 public class MainActivity extends BridgeActivity {
+
+    /** Pousse une ligne de diagnostic vers le relais local (lisible à distance
+     *  via le tunnel : débogage natif sans PC ni ADB). Best effort, async. */
+    private void nativeLog(String line) {
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                SharedPreferences p = getSharedPreferences("claude_comm", Context.MODE_PRIVATE);
+                String token = p.getString("token", "");
+                int port = p.getInt("port", 8787);
+                if (token.isEmpty()) return;
+                URL url = new URL("http://127.0.0.1:" + port + "/native-log");
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Authorization", "Bearer " + token);
+                conn.setRequestProperty("Content-Type", "application/json");
+                String json = "{\"line\":\"" + line.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(json.getBytes("UTF-8"));
+                }
+                conn.getResponseCode();
+            } catch (Exception ignored) {
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }).start();
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -30,6 +66,7 @@ public class MainActivity extends BridgeActivity {
         this.bridge.getWebView().setWebViewClient(new BridgeWebViewClient(this.bridge) {
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                nativeLog("renderer WebView tue (crash=" + (detail != null && detail.didCrash()) + ") -> recreate");
                 runOnUiThread(() -> recreate());
                 return true; // géré : ne pas tuer l'application
             }
@@ -47,6 +84,7 @@ public class MainActivity extends BridgeActivity {
         super.onResume();
         final WebView wv = this.bridge.getWebView();
         if (wv == null) return;
+        nativeLog("onResume");
 
         // Diagnostic confirmé en test réel (3 défenses précédentes inefficaces) :
         // le moteur JS reste VIVANT (1+1 répond) mais le CONTENU de la page est
@@ -75,11 +113,14 @@ public class MainActivity extends BridgeActivity {
                     "(function(){var r=document.getElementById('root');"
                         + "return (r && r.children && r.children.length>0) ? 'ok' : 'blank';})()",
                     value -> {
+                        nativeLog("contenu racine=" + value);
                         if (value == null || value.contains("blank")) {
+                            nativeLog("page vide -> rechargement WebView");
                             runOnUiThread(wv::reload);
                         }
                     });
             } catch (Exception e) {
+                nativeLog("sonde contenu echec -> rechargement : " + e.getMessage());
                 runOnUiThread(wv::reload);
             }
         }, 400);
