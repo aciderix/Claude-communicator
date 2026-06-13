@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Server, MonitorSmartphone, Radio, AlertCircle, ArrowRight, Copy, Check, Cloud } from 'lucide-react';
+import { Server, MonitorSmartphone, Radio, AlertCircle, ArrowRight, Copy, Check, Cloud, HelpCircle } from 'lucide-react';
 import { Card, Input, Button } from './UI';
+import HelpModal from './HelpModal';
 import { ApiClient } from '../api';
 import {
   startEmbeddedHost, isNativeHostAvailable, HostInfo, startKeepAlive,
@@ -78,6 +79,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  const [showHelp, setShowHelp] = useState(false);
   const [hostExpose, setHostExpose] = useState(false);
   const [hostStatus, setHostStatus] = useState<string>('');
   const [hostInfo, setHostInfo] = useState<any>(null);
@@ -200,6 +202,13 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                 <p className="text-slate-500 text-xs">Lancer sur cet appareil Android.</p>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-700 group-hover:text-slate-300 transition-colors" />
+            </button>
+
+            <button
+              onClick={() => setShowHelp(true)}
+              className="w-full flex items-center justify-center gap-2 text-xs text-slate-500 hover:text-slate-300 transition-colors py-2"
+            >
+              <HelpCircle className="w-4 h-4" /> Première fois ? Comment ça marche
             </button>
           </div>
         ) : (
@@ -354,6 +363,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           </Card>
         )}
       </div>
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
     </div>
   );
 }

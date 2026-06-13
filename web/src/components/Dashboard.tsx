@@ -8,8 +8,9 @@ import QuestionsList from './QuestionsList';
 import MiscLists from './MiscLists';
 import ChannelSelect from './ChannelSelect';
 import { Button, Input, Card, Badge } from './UI';
-import { LogOut, Activity, Map, MessageSquareText, MessageSquareDashed, X, FolderTree, Radio, Info, Timer } from 'lucide-react';
+import { LogOut, Activity, Map, MessageSquareText, MessageSquareDashed, X, FolderTree, Radio, Info, Timer, HelpCircle } from 'lucide-react';
 import { CopyRow } from './LoginScreen';
+import HelpModal from './HelpModal';
 import { startEmbeddedHost, isNativeHostAvailable, startKeepAlive } from '../host';
 
 export default function Dashboard({
@@ -38,6 +39,7 @@ export default function Dashboard({
 
   // Infos d'hébergement (app en mode hôte) : URL, jeton… toujours accessibles
   const [showHostInfo, setShowHostInfo] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   // Infos de connexion, disponibles dans LES DEUX modes :
   //  - hébergeur : URL WiFi + publique + jeton (depuis cc_host_info)
   //  - client (cloud/distant) : l'URL du relais + le jeton de connexion
@@ -214,6 +216,9 @@ export default function Dashboard({
               <Info className="w-4 h-4" /> Infos de connexion
             </Button>
           )}
+          <Button variant="ghost" onClick={() => setShowHelp(true)} className="w-full justify-start h-9 text-slate-300">
+            <HelpCircle className="w-4 h-4" /> Aide
+          </Button>
           <div className="space-y-2">
             <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Canal Actif</label>
             <ChannelSelect
@@ -241,6 +246,9 @@ export default function Dashboard({
                  <Info className="w-4 h-4" />
                </button>
              )}
+             <button onClick={() => setShowHelp(true)} className="text-slate-400 hover:text-slate-200 p-1" title="Aide">
+               <HelpCircle className="w-4 h-4" />
+             </button>
              <span className={`w-1.5 h-1.5 rounded-full ${errorStatus ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`}></span>
              <ChannelSelect
                channel={channel}
@@ -369,6 +377,9 @@ export default function Dashboard({
             );
           })}
       </nav>
+
+      {/* HELP MODAL */}
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
 
       {/* HOST INFO MODAL */}
       {showHostInfo && connInfo && (
