@@ -87,6 +87,20 @@ function loadSecret(dir) {
   return s;
 }
 
+// Sous-domaine FIXE persisté (comme le jeton) → URL publique STABLE qui ne
+// change plus jamais entre redémarrages : on configure agents et connecteur
+// claude.ai une seule fois. Forme : claude-comm-<8 hex> (collision quasi nulle).
+function loadSubdomain(dir) {
+  const file = path.join(dir, 'subdomain.txt');
+  try {
+    const s = fs.readFileSync(file, 'utf8').trim();
+    if (s) return s;
+  } catch { /* première fois */ }
+  const s = 'claude-comm-' + crypto.randomBytes(4).toString('hex');
+  fs.writeFileSync(file, s);
+  return s;
+}
+
 let starting = null;
 
 async function startRelay(cfg) {
@@ -107,11 +121,12 @@ async function startRelay(cfg) {
     require('./relay.js');
     step(`relais démarré sur ${port}`);
 
-    DIAG.info = { port, secret, lanIp: lanIp(), publicUrl: null };
+    const subdomain = loadSubdomain(dir);
+    DIAG.info = { port, secret, subdomain, lanIp: lanIp(), publicUrl: null };
     DIAG.started = true;
 
     if (cfg.expose) {
-      await openTunnel(port);
+      await openTunnel(port, subdomain);
     }
     return DIAG.info;
   })();
@@ -130,10 +145,11 @@ const withTimeout = (p, ms, label) => Promise.race([
   new Promise((_r, rej) => setTimeout(() => rej(new Error(`${label} : délai dépassé (${ms / 1000}s)`)), ms)),
 ]);
 
-async function openTunnel(port) {
-  // première connexion : on attend le résultat pour le renvoyer à l'app ;
-  // ensuite la maintenance continue en arrière-plan.
-  const first = await connectTunnel(port, null);
+async function openTunnel(port, subdomain) {
+  // première connexion sur le sous-domaine FIXE → URL stable. Si pris (rare,
+  // collision improbable), repli sur sous-domaine aléatoire pour ne pas
+  // bloquer ; ensuite la maintenance continue en arrière-plan.
+  const first = await connectTunnel(port, subdomain) || await connectTunnel(port, null);
   if (first) {
     maintainTunnel(port, first.subdomain, first.tunnel); // pas de await : boucle de fond
     return;
