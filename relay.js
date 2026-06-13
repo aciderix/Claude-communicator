@@ -904,8 +904,19 @@ async function handle(req, res) {
     return res.end();
   }
   if (req.method === 'GET' && u.pathname === '/healthz') {
-    // persistance : disk (--data), upstash, ou aucune (etat ephemere)
+    // persistance : disk (--data), backend externe (redis/upstash), ou aucune
     const persistence = DATA ? 'disk' : STORE_ON ? STORE_BACKEND : 'none';
+    // ?store=1 : test REEL d'ecriture+lecture sur le backend externe
+    if (u.searchParams.get('store') === '1' && STORE_ON) {
+      const marker = `ok-${Date.now()}`;
+      try {
+        await storeSet('claude-comm:healthcheck', marker);
+        const back = await storeGet('claude-comm:healthcheck');
+        return json(res, 200, { ok: true, persistence, persistent: true, storeOk: back === marker });
+      } catch (e) {
+        return json(res, 200, { ok: true, persistence, persistent: false, storeOk: false, storeError: e.message });
+      }
+    }
     return json(res, 200, { ok: true, persistence, persistent: persistence !== 'none' });
   }
   // Le HTML du dashboard est public (il ne contient aucune donnée) :
