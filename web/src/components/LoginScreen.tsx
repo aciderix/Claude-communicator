@@ -225,6 +225,23 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                     <div className="text-xs text-emerald-300/70">Déployer gratuitement sur Render (URL fixe, ~3 min) →</div>
                   </div>
                 </a>
+
+                <details className="rounded-xl border border-white/5 bg-slate-900/50 text-xs">
+                  <summary className="cursor-pointer p-3 text-slate-300 select-none">
+                    💾 Rendre l'état persistant (gratuit) — guide Upstash
+                  </summary>
+                  <div className="px-3 pb-3 space-y-2 text-slate-400 leading-relaxed">
+                    <p>Render gratuit perd l'état quand l'instance s'endort. Pour qu'il survive (100&nbsp;% gratuit) :</p>
+                    <ol className="list-decimal pl-4 space-y-1">
+                      <li>Crée un compte sur <a href="https://upstash.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">upstash.com</a> → <em>Create Database</em> (Redis), région proche.</li>
+                      <li>Dans la base, copie <span className="font-mono text-slate-300">REST URL</span> et <span className="font-mono text-slate-300">REST TOKEN</span>.</li>
+                      <li>Render → ton service → <em>Environment</em> → ajoute&nbsp;:
+                        <div className="font-mono text-[10px] text-slate-300 mt-1 break-all">UPSTASH_REDIS_REST_URL = …<br/>UPSTASH_REDIS_REST_TOKEN = …</div>
+                      </li>
+                      <li>Save → Render redéploie. C'est tout : l'état est désormais sauvegardé dehors et restauré au réveil.</li>
+                    </ol>
+                  </div>
+                </details>
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wide">URL du relais</label>
                   <Input

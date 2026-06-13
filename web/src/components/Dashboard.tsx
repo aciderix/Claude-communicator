@@ -55,6 +55,7 @@ export default function Dashboard({
 
   const [standupDraft, setStandupDraft] = useState<string | null>(null);
   const [standupSaved, setStandupSaved] = useState(false);
+  const [persistence, setPersistence] = useState<string>(''); // disk | upstash | none | ''
 
   const versionRef = useRef(0);
   const runningRef = useRef(true);
@@ -72,6 +73,10 @@ export default function Dashboard({
     if (localStorage.getItem('cc_mode') === 'client' && base && !base.includes('127.0.0.1')) {
       startKeepAlive(base, token, channel);
     }
+
+    // etat de persistance du relais (disk / upstash / none)
+    fetch(`${base.replace(/\/+$/, '')}/healthz`, { headers: { 'bypass-tunnel-reminder': '1' } })
+      .then(r => r.json()).then(d => setPersistence(d.persistence || '')).catch(() => {});
 
 
     const poll = async () => {
@@ -383,6 +388,16 @@ export default function Dashboard({
             <CopyRow label={connInfo.mode === 'client' ? 'URL du relais' : 'URL publique'} value={connInfo.url || ''} />
             <CopyRow label="Jeton secret" value={connInfo.token || ''} />
             <CopyRow label="Canal" value={channel} />
+
+            {persistence && (
+              <div className={`text-xs rounded-lg p-2.5 border ${persistence === 'none'
+                ? 'border-amber-500/20 bg-amber-500/10 text-amber-200'
+                : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'}`}>
+                {persistence === 'none'
+                  ? <>⚠️ État éphémère : ce relais perd ses données au redémarrage. Pour le rendre persistant (gratuit), active Upstash — voir le guide à l'écran « Se connecter ».</>
+                  : <>💾 État persistant ({persistence === 'upstash' ? 'Upstash' : 'disque'}) : tes données survivent aux redémarrages.</>}
+              </div>
+            )}
 
             <div className="pt-3 border-t border-slate-800 space-y-3">
               <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">

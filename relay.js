@@ -799,7 +799,9 @@ async function handle(req, res) {
     return res.end();
   }
   if (req.method === 'GET' && u.pathname === '/healthz') {
-    return json(res, 200, { ok: true });
+    // persistance : disk (--data), upstash, ou aucune (etat ephemere)
+    const persistence = DATA ? 'disk' : UPSTASH_ON ? 'upstash' : 'none';
+    return json(res, 200, { ok: true, persistence, persistent: persistence !== 'none' });
   }
   // Le HTML du dashboard est public (il ne contient aucune donnée) :
   // le jeton est saisi dans l'interface et requis pour tous les appels API.
