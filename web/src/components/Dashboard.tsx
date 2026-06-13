@@ -219,7 +219,7 @@ export default function Dashboard({
             />
           </div>
           <Button variant="ghost" onClick={onLogout} className="w-full justify-start text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 h-9">
-            <LogOut className="w-4 h-4" /> Déconnexion
+            <LogOut className="w-4 h-4" /> Menu principal
           </Button>
         </div>
       </aside>
@@ -244,6 +244,9 @@ export default function Dashboard({
                onSelect={(c) => { localStorage.setItem('cc_channel', c); setChannel(c); }}
                fetchChannels={() => api.getChannels()}
              />
+             <button onClick={onLogout} className="text-slate-400 hover:text-rose-400 p-1" title="Menu principal (changer de mode)">
+               <LogOut className="w-4 h-4" />
+             </button>
            </div>
         </div>
       </header>
