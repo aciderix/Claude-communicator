@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Server, MonitorSmartphone, Radio, AlertCircle, ArrowRight, Copy, Check } from 'lucide-react';
+import { Server, MonitorSmartphone, Radio, AlertCircle, ArrowRight, Copy, Check, Cloud } from 'lucide-react';
 import { Card, Input, Button } from './UI';
 import { ApiClient } from '../api';
 import {
@@ -206,12 +206,24 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
             {mode === 'client' && (
               <div className="space-y-5">
+                <a
+                  href="https://render.com/deploy?repo=https://github.com/aciderix/claude-communicator"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 hover:bg-emerald-500/15 transition-colors"
+                >
+                  <Cloud className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-emerald-200">Pas encore de relais cloud ?</div>
+                    <div className="text-xs text-emerald-300/70">Déployer gratuitement sur Render (URL fixe, ~3 min) →</div>
+                  </div>
+                </a>
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wide">URL du relais</label>
-                  <Input 
-                    value={base} 
-                    onChange={e => setBase(e.target.value)} 
-                    placeholder="https://mon-relais.onrender.com" 
+                  <Input
+                    value={base}
+                    onChange={e => setBase(e.target.value)}
+                    placeholder="https://mon-relais.onrender.com"
                     className="w-full"
                   />
                 </div>
