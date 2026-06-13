@@ -36,12 +36,19 @@ export default function Dashboard({
   const [diffPeer, setDiffPeer] = useState<string | null>(null);
   const [diffContent, setDiffContent] = useState<string>('Chargement...');
 
-  // Infos d'hébergement (app en mode hôte) : URL, jeton… toujours accessibles
-  const [showHostInfo, setShowHostInfo] = useState(false);
+  // Infos de connexion : URL, jeton… toujours accessibles via le bouton ℹ️.
+  // Disponible en mode hôte (relais embarqué) ET en mode client (relais
+  // distant, ex. Render) pour transmettre rapidement les accès aux agents.
+  const [showConnInfo, setShowConnInfo] = useState(false);
   const hostInfo = (() => {
     try { return JSON.parse(localStorage.getItem('cc_host_info') || 'null'); }
     catch { return null; }
   })();
+  // En mode client, l'URL et le jeton viennent des props de connexion.
+  const isHost = !!hostInfo;
+  const relayUrl = isHost ? (hostInfo.publicUrl || hostInfo.wifiUrl) : base;
+  const connToken = isHost ? hostInfo.token : token;
+  const isRender = /onrender\.com/i.test(relayUrl || '');
 
   const [standupDraft, setStandupDraft] = useState<string | null>(null);
   const [standupSaved, setStandupSaved] = useState(false);
@@ -187,11 +194,9 @@ export default function Dashboard({
         </nav>
 
         <div className="p-4 border-t border-slate-800/60 space-y-4">
-          {hostInfo && (
-            <Button variant="ghost" onClick={() => setShowHostInfo(true)} className="w-full justify-start h-9 text-slate-300">
-              <Info className="w-4 h-4" /> Infos de connexion
-            </Button>
-          )}
+          <Button variant="ghost" onClick={() => setShowConnInfo(true)} className="w-full justify-start h-9 text-slate-300">
+            <Info className="w-4 h-4" /> Infos de connexion
+          </Button>
           <div className="space-y-2">
             <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Canal Actif</label>
             <ChannelSelect
@@ -214,11 +219,9 @@ export default function Dashboard({
         </div>
         <div className="flex flex-col items-end gap-2">
            <div className="flex items-center gap-2">
-             {hostInfo && (
-               <button onClick={() => setShowHostInfo(true)} className="text-slate-400 hover:text-slate-200 p-1" title="Infos de connexion">
-                 <Info className="w-4 h-4" />
-               </button>
-             )}
+             <button onClick={() => setShowConnInfo(true)} className="text-slate-400 hover:text-slate-200 p-1" title="Infos de connexion">
+               <Info className="w-4 h-4" />
+             </button>
              <span className={`w-1.5 h-1.5 rounded-full ${errorStatus ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`}></span>
              <ChannelSelect
                channel={channel}
@@ -345,21 +348,40 @@ export default function Dashboard({
           })}
       </nav>
 
-      {/* HOST INFO MODAL */}
-      {showHostInfo && hostInfo && (
+      {/* CONNECTION INFO MODAL */}
+      {showConnInfo && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-[#050505]/80 backdrop-blur-sm" onClick={() => setShowHostInfo(false)}></div>
+          <div className="absolute inset-0 bg-[#050505]/80 backdrop-blur-sm" onClick={() => setShowConnInfo(false)}></div>
           <Card className="relative w-full max-w-md max-h-[85vh] overflow-y-auto custom-scrollbar p-5 border border-slate-800 shadow-2xl bg-[#0d1117] space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="font-medium text-slate-200 uppercase tracking-wider text-xs">Connexion d'autres appareils</h3>
-              <button onClick={() => setShowHostInfo(false)} className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-slate-800 text-slate-400 hover:text-white">
+              <h3 className="font-medium text-slate-200 uppercase tracking-wider text-xs">
+                {isHost ? "Connexion d'autres appareils" : 'Infos de connexion'}
+              </h3>
+              <button onClick={() => setShowConnInfo(false)} className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-slate-800 text-slate-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <CopyRow label="Local (WiFi)" value={hostInfo.wifiUrl || ''} />
-            {hostInfo.publicUrl && <CopyRow label="Public (Internet)" value={hostInfo.publicUrl} />}
-            <CopyRow label="Jeton secret" value={hostInfo.token || ''} />
+
+            {isHost ? (
+              <>
+                <CopyRow label="Local (WiFi)" value={hostInfo.wifiUrl || ''} />
+                {hostInfo.publicUrl && <CopyRow label="Public (Internet)" value={hostInfo.publicUrl} />}
+              </>
+            ) : (
+              <CopyRow label="URL du relais" value={relayUrl || ''} />
+            )}
+            <CopyRow label="Jeton secret" value={connToken || ''} />
             <CopyRow label="Canal" value={channel} />
+
+            {isRender && (
+              <div className="p-3 rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-200 text-xs leading-relaxed">
+                🔑 Relais Render : le jeton est généré et stocké dans les
+                variables d'environnement de ton service Render
+                (clé <span className="font-mono">CLAUDE_COMM_RELAY_SECRET</span>,
+                bouton « Reveal » dans l'onglet Environment). Il est rappelé
+                ci-dessus pour transmission rapide aux agents.
+              </div>
+            )}
 
             <div className="pt-3 border-t border-slate-800 space-y-3">
               <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
@@ -367,11 +389,11 @@ export default function Dashboard({
               </p>
               <CopyRow
                 label="Session ponctuelle — à coller dans un terminal du projet"
-                value={`CLAUDE_COMM_NAME=alice CLAUDE_COMM_CHANNEL=${channel} CLAUDE_COMM_RELAY=${hostInfo.publicUrl || hostInfo.wifiUrl} CLAUDE_COMM_TOKEN=${hostInfo.token} claude`}
+                value={`CLAUDE_COMM_NAME=alice CLAUDE_COMM_CHANNEL=${channel} CLAUDE_COMM_RELAY=${relayUrl} CLAUDE_COMM_TOKEN=${connToken} claude`}
               />
               <CopyRow
                 label="Machine entière 1/2 — mémoriser la connexion"
-                value={`node server.js login ${hostInfo.publicUrl || hostInfo.wifiUrl} ${hostInfo.token} ${channel}`}
+                value={`node server.js login ${relayUrl} ${connToken} ${channel}`}
               />
               <CopyRow
                 label="Machine entière 2/2 — outils comm_* dans tous les projets"
@@ -379,7 +401,7 @@ export default function Dashboard({
               />
               <CopyRow
                 label="Connecteur claude.ai (web/mobile) — URL du serveur MCP distant"
-                value={`${hostInfo.publicUrl || hostInfo.wifiUrl}/mcp/${hostInfo.token}/${encodeURIComponent(channel)}/claude-web`}
+                value={`${relayUrl}/mcp/${connToken}/${encodeURIComponent(channel)}/claude-web`}
               />
               <p className="text-xs text-slate-500">
                 server.js vient du dépôt claude-communicator (git clone, aucun npm install).

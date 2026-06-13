@@ -218,20 +218,30 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wide">Authentification</label>
                   <div className="grid grid-cols-2 gap-3">
-                    <Input 
-                      value={pairCode} 
-                      onChange={e => setPairCode(e.target.value)} 
-                      placeholder="Code (6 chiffres)" 
+                    <Input
+                      value={pairCode}
+                      onChange={e => setPairCode(e.target.value)}
+                      placeholder="Code (6 chiffres)"
                       maxLength={6}
                     />
-                    <Input 
+                    <Input
                       type="password"
-                      value={token} 
-                      onChange={e => setToken(e.target.value)} 
-                      placeholder="Ou Jeton long" 
+                      value={token}
+                      onChange={e => setToken(e.target.value)}
+                      placeholder="Ou Jeton long"
                     />
                   </div>
                 </div>
+
+                {/onrender\.com/i.test(base) && (
+                  <div className="p-3 rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-200 text-xs leading-relaxed">
+                    🔑 Relais Render détecté : le jeton est dans les variables
+                    d'environnement de ton service Render
+                    (clé <span className="font-mono">CLAUDE_COMM_RELAY_SECRET</span>,
+                    onglet Environment → « Reveal »). Colle-le dans le champ
+                    « Jeton long » (le code à 6 chiffres ne s'applique pas à Render).
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wide">Canal</label>
                   <Input 
