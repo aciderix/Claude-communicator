@@ -48,26 +48,40 @@ public class MainActivity extends BridgeActivity {
         final WebView wv = this.bridge.getWebView();
         if (wv == null) return;
 
-        // Correctif MIUI « WebView noir au retour » : le renderer est souvent
-        // VIVANT mais le compositeur ne redessine pas la surface. Re-dessin
-        // forcé par bascule de visibilité + invalidation.
+        // Diagnostic confirmé en test réel (3 défenses précédentes inefficaces) :
+        // le moteur JS reste VIVANT (1+1 répond) mais le CONTENU de la page est
+        // purgé ou non peint par MIUI -> écran noir. Remède en couches :
+
+        // 1) relancer le cycle de vie propre du WebView (Capacitor le met en
+        //    pause en arrière-plan : rendu et timers JS gelés).
+        try {
+            wv.onResume();
+            wv.resumeTimers();
+        } catch (Exception ignored) { /* selon version WebView */ }
+
+        // 2) re-dessin forcé du compositeur (cas « surface non repeinte »).
         wv.setVisibility(android.view.View.GONE);
         wv.postDelayed(() -> {
             wv.setVisibility(android.view.View.VISIBLE);
             wv.postInvalidate();
-        }, 60);
+        }, 50);
 
-        // Et si le renderer est réellement mort : sonde JS, recréation.
-        final boolean[] alive = { false };
-        try {
-            wv.evaluateJavascript("1+1", value -> alive[0] = true);
-        } catch (Exception e) {
-            alive[0] = false;
-        }
+        // 3) sonde de CONTENU (pas seulement du moteur JS) : si la racine React
+        //    est vide -> la page a été purgée -> rechargement (l'app relit
+        //    localStorage et se reconnecte seule, rien n'est perdu).
         wv.postDelayed(() -> {
-            if (!alive[0]) {
-                runOnUiThread(this::recreate);
+            try {
+                wv.evaluateJavascript(
+                    "(function(){var r=document.getElementById('root');"
+                        + "return (r && r.children && r.children.length>0) ? 'ok' : 'blank';})()",
+                    value -> {
+                        if (value == null || value.contains("blank")) {
+                            runOnUiThread(wv::reload);
+                        }
+                    });
+            } catch (Exception e) {
+                runOnUiThread(wv::reload);
             }
-        }, 3000);
+        }, 400);
     }
 }
