@@ -64,13 +64,18 @@ const PORT = Number(ARGS.port || process.env.PORT || 8787);
 const HOST = ARGS.host || process.env.CLAUDE_COMM_RELAY_HOST || '127.0.0.1';
 const DATA = ARGS.data ? path.resolve(ARGS.data) : null;
 
-// Persistance externe optionnelle via Upstash Redis (REST) : permet de
-// survivre aux redemarrages/sommeils sur un hote SANS disque (ex: Render
-// gratuit). Active si les 2 variables d'env sont fournies.
+// Persistance externe optionnelle : permet de survivre aux redemarrages/
+// sommeils sur un hote SANS disque (ex: Render gratuit). Deux backends :
+//  - REDIS_URL (redis:// ou rediss://) : protocole Redis standard. Marche
+//    avec le Key Value NATIF de Render (cable automatiquement via render.yaml,
+//    ZERO saisie) ou n'importe quel Redis (Upstash fournit aussi une redis://).
+//  - UPSTASH_REDIS_REST_URL + _TOKEN : API REST Upstash (a saisir a la main).
+const REDIS_URL = process.env.REDIS_URL || process.env.KEYVALUE_URL || '';
 const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
-const UPSTASH_KEY = process.env.UPSTASH_KEY || 'claude-comm:state';
-const UPSTASH_ON = !!(UPSTASH_URL && UPSTASH_TOKEN);
+const STORE_KEY = process.env.CLAUDE_COMM_STATE_KEY || 'claude-comm:state';
+const STORE_BACKEND = REDIS_URL ? 'redis' : (UPSTASH_URL && UPSTASH_TOKEN) ? 'upstash' : 'none';
+const STORE_ON = STORE_BACKEND !== 'none';
 
 let SECRET = ARGS.secret || process.env.CLAUDE_COMM_RELAY_SECRET || '';
 let secretGenerated = false;
@@ -183,8 +188,8 @@ function persist(ch) {
   }, 500);
 }
 
-// --- Upstash Redis (REST) : un seul appel commande ---------------------------
-async function upstashCmd(cmd) {
+// --- Backend Upstash REST ----------------------------------------------------
+async function upstashRest(cmd) {
   const r = await fetch(UPSTASH_URL, {
     method: 'POST',
     headers: { authorization: `Bearer ${UPSTASH_TOKEN}`, 'content-type': 'application/json' },
@@ -196,33 +201,133 @@ async function upstashCmd(cmd) {
   return d.result;
 }
 
-// Sauvegarde debouncee de TOUS les canaux dans une seule cle Upstash.
-let upstashTimer = null;
-function upstashSave() {
-  if (!UPSTASH_ON || upstashTimer) return;
-  upstashTimer = setTimeout(async () => {
-    upstashTimer = null;
+// --- Backend Redis (protocole RESP, zero dependance) -------------------------
+const net = require('net');
+const tls = require('tls');
+
+function respEncode(args) {
+  let s = `*${args.length}\r\n`;
+  for (const a of args) { const str = String(a); s += `$${Buffer.byteLength(str)}\r\n${str}\r\n`; }
+  return Buffer.from(s, 'utf8');
+}
+
+// Decode UNE reponse RESP a partir de offset. Retourne {value, next} ou null
+// si incomplete.
+function respDecode(buf, offset) {
+  if (offset >= buf.length) return null;
+  const type = buf[offset];
+  const nl = buf.indexOf('\r\n', offset);
+  if (nl === -1) return null;
+  const line = buf.toString('utf8', offset + 1, nl);
+  if (type === 0x2b) return { value: line, next: nl + 2 };               // +simple
+  if (type === 0x2d) return { value: new Error(line), next: nl + 2 };    // -error
+  if (type === 0x3a) return { value: Number(line), next: nl + 2 };       // :int
+  if (type === 0x24) {                                                   // $bulk
+    const len = Number(line);
+    if (len === -1) return { value: null, next: nl + 2 };
+    const start = nl + 2;
+    if (start + len + 2 > buf.length) return null;
+    return { value: buf.toString('utf8', start, start + len), next: start + len + 2 };
+  }
+  if (type === 0x2a) {                                                   // *array
+    const count = Number(line);
+    if (count === -1) return { value: null, next: nl + 2 };
+    let cur = nl + 2; const arr = [];
+    for (let i = 0; i < count; i++) {
+      const r = respDecode(buf, cur);
+      if (!r) return null;
+      arr.push(r.value); cur = r.next;
+    }
+    return { value: arr, next: cur };
+  }
+  return null;
+}
+
+// Ouvre une connexion, AUTH si besoin, envoie les commandes en pipeline,
+// renvoie la reponse de la DERNIERE.
+function redisExec(url, commands) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch { return reject(new Error('REDIS_URL invalide')); }
+    const useTls = u.protocol === 'rediss:';
+    const host = u.hostname;
+    const port = Number(u.port) || 6379;
+    const password = decodeURIComponent(u.password || '');
+    const username = decodeURIComponent(u.username || '');
+    const all = [];
+    if (password) all.push(username ? ['AUTH', username, password] : ['AUTH', password]);
+    for (const c of commands) all.push(c);
+
+    const sock = useTls
+      ? tls.connect({ host, port, servername: host, rejectUnauthorized: false })
+      : net.connect({ host, port });
+    let buf = Buffer.alloc(0);
+    let done = false;
+    const replies = [];
+    const finish = (err, val) => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      try { sock.destroy(); } catch { /* ignore */ }
+      err ? reject(err) : resolve(val);
+    };
+    const timer = setTimeout(() => finish(new Error('redis timeout')), 8000);
+    sock.on('error', (e) => finish(e));
+    const send = () => sock.write(Buffer.concat(all.map(respEncode)));
+    sock.on(useTls ? 'secureConnect' : 'connect', send);
+    sock.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      let off = 0;
+      for (;;) {
+        const r = respDecode(buf, off);
+        if (!r) break;
+        off = r.next; replies.push(r.value);
+        if (replies.length >= all.length) {
+          for (const rep of replies) if (rep instanceof Error) return finish(rep);
+          return finish(null, replies[replies.length - 1]);
+        }
+      }
+      buf = buf.subarray(off);
+    });
+  });
+}
+
+// --- API de stockage unifiee -------------------------------------------------
+async function storeSet(key, value) {
+  if (STORE_BACKEND === 'redis') return redisExec(REDIS_URL, [['SET', key, value]]);
+  return upstashRest(['SET', key, value]);
+}
+async function storeGet(key) {
+  if (STORE_BACKEND === 'redis') return redisExec(REDIS_URL, [['GET', key]]);
+  return upstashRest(['GET', key]);
+}
+
+// Sauvegarde debouncee de TOUS les canaux dans une seule cle.
+let storeTimer = null;
+function upstashSave() { // nom conserve : appele depuis persist()
+  if (!STORE_ON || storeTimer) return;
+  storeTimer = setTimeout(async () => {
+    storeTimer = null;
     try {
       const all = {};
       for (const [name, ch] of channels) all[name] = serializeChannel(ch);
-      await upstashCmd(['SET', UPSTASH_KEY, JSON.stringify(all)]);
-    } catch (e) { console.error('upstash save:', e.message); }
+      await storeSet(STORE_KEY, JSON.stringify(all));
+    } catch (e) { console.error('persistance externe (save):', e.message); }
   }, 2000);
 }
 
-async function upstashLoad() {
-  if (!UPSTASH_ON) return;
+async function upstashLoad() { // nom conserve : appele au demarrage
+  if (!STORE_ON) return;
   try {
-    const raw = await upstashCmd(['GET', UPSTASH_KEY]);
-    if (!raw) { console.error('Upstash : aucun etat sauvegarde (premier demarrage).'); return; }
+    const raw = await storeGet(STORE_KEY);
+    if (!raw) { console.error(`Persistance ${STORE_BACKEND} : aucun etat sauvegarde (premier demarrage).`); return; }
     const all = JSON.parse(raw);
     for (const [name, d] of Object.entries(all)) {
       const ch = newChannel(sanitizeName(name));
       deserializeInto(ch, d);
       channels.set(ch.name, ch);
     }
-    console.error(`Etat restaure depuis Upstash : ${channels.size} canal/canaux.`);
-  } catch (e) { console.error('upstash load:', e.message); }
+    console.error(`Etat restaure depuis ${STORE_BACKEND} : ${channels.size} canal/canaux.`);
+  } catch (e) { console.error('persistance externe (load):', e.message); }
 }
 
 function loadPersisted() {
@@ -800,7 +905,7 @@ async function handle(req, res) {
   }
   if (req.method === 'GET' && u.pathname === '/healthz') {
     // persistance : disk (--data), upstash, ou aucune (etat ephemere)
-    const persistence = DATA ? 'disk' : UPSTASH_ON ? 'upstash' : 'none';
+    const persistence = DATA ? 'disk' : STORE_ON ? STORE_BACKEND : 'none';
     return json(res, 200, { ok: true, persistence, persistent: persistence !== 'none' });
   }
   // Le HTML du dashboard est public (il ne contient aucune donnée) :
@@ -1134,8 +1239,8 @@ server.listen(PORT, HOST, () => {
     console.error('⚠️  Exposé sans TLS : place un reverse proxy HTTPS devant, ou utilise --tls-cert/--tls-key.');
   }
   if (DATA) console.error(`Persistance disque : ${DATA}`);
-  if (UPSTASH_ON) {
-    console.error('Persistance Upstash : activee.');
+  if (STORE_ON) {
+    console.error(`Persistance externe : ${STORE_BACKEND} activee.`);
     upstashReady.catch(() => {});
   }
   newPairCode();

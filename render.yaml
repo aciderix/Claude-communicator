@@ -1,12 +1,13 @@
 # Déploiement 1-clic du relais claude-comm sur Render :
 # https://render.com/deploy?repo=https://github.com/aciderix/claude-communicator
 #
-# Plan free : URL HTTPS stable, secret généré automatiquement. L'état est
-# en mémoire (perdu au sommeil de l'instance). Pour le rendre PERSISTANT en
-# restant 100 % gratuit : cree un Redis gratuit sur Upstash (upstash.com),
-# et renseigne les 2 variables UPSTASH_REDIS_REST_URL / _TOKEN ci-dessous
-# (depuis le dashboard Render → Environment). L'etat est alors sauvegarde
-# dehors et restaure au reveil. (Alternative payante : disque, voir plus bas.)
+# PERSISTANCE AUTOMATIQUE : ce blueprint cree aussi un Key Value (Redis) natif
+# Render et cable sa connexion (REDIS_URL) tout seul -> l'etat survit aux
+# sommeils/redemarrages, ZERO variable a saisir a la main. 100 % gratuit.
+#
+# (Alternative : laisser le Key Value de cote et renseigner a la place
+# UPSTASH_REDIS_REST_URL / _TOKEN depuis un compte Upstash gratuit. Le relais
+# detecte automatiquement le backend disponible.)
 services:
   - type: web
     name: claude-comm-relay
@@ -18,13 +19,21 @@ services:
     envVars:
       - key: CLAUDE_COMM_RELAY_SECRET
         generateValue: true
-      # Persistance gratuite via Upstash Redis (laisser vide = etat ephemere) :
+      # Connexion au Key Value Render, injectee automatiquement (rien a saisir) :
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: claude-comm-kv
+          property: connectionString
+      # Alternative manuelle (Upstash) — laisser vide si on utilise le Key Value :
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
-    # Alternative payante (plan starter) : disque persistant.
-    # disk:
-    #   name: claude-comm-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+
+  # Key Value (Redis) natif Render : persistance gratuite, cree automatiquement.
+  - type: keyvalue
+    name: claude-comm-kv
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList: []   # connexions internes uniquement (le relais y accede en interne)

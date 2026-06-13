@@ -228,18 +228,29 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
                 <details className="rounded-xl border border-white/5 bg-slate-900/50 text-xs">
                   <summary className="cursor-pointer p-3 text-slate-300 select-none">
-                    💾 Rendre l'état persistant (gratuit) — guide Upstash
+                    💾 Rendre l'état persistant (gratuit)
                   </summary>
-                  <div className="px-3 pb-3 space-y-2 text-slate-400 leading-relaxed">
+                  <div className="px-3 pb-3 space-y-3 text-slate-400 leading-relaxed">
                     <p>Render gratuit perd l'état quand l'instance s'endort. Pour qu'il survive (100&nbsp;% gratuit) :</p>
-                    <ol className="list-decimal pl-4 space-y-1">
-                      <li>Crée un compte sur <a href="https://upstash.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">upstash.com</a> → <em>Create Database</em> (Redis), région proche.</li>
-                      <li>Dans la base, copie <span className="font-mono text-slate-300">REST URL</span> et <span className="font-mono text-slate-300">REST TOKEN</span>.</li>
-                      <li>Render → ton service → <em>Environment</em> → ajoute&nbsp;:
-                        <div className="font-mono text-[10px] text-slate-300 mt-1 break-all">UPSTASH_REDIS_REST_URL = …<br/>UPSTASH_REDIS_REST_TOKEN = …</div>
-                      </li>
-                      <li>Save → Render redéploie. C'est tout : l'état est désormais sauvegardé dehors et restauré au réveil.</li>
-                    </ol>
+
+                    <div>
+                      <p className="text-slate-300 font-medium mb-1">✅ Nouveau déploiement = automatique</p>
+                      <p>Le bouton « Déployer sur Render » ci-dessus crée maintenant <em>tout seul</em> un Key&nbsp;Value (Redis) Render et le connecte. Rien à saisir : la persistance est active d'office.</p>
+                    </div>
+
+                    <div>
+                      <p className="text-slate-300 font-medium mb-1">Service Render déjà existant — 1 variable</p>
+                      <ol className="list-decimal pl-4 space-y-1">
+                        <li>Render → <em>New</em> → <em>Key Value</em> (plan free), même région.</li>
+                        <li>Copie sa <span className="font-mono text-slate-300">Internal Connection String</span> (redis://…).</li>
+                        <li>Ton service → <em>Environment</em> → ajoute <span className="font-mono text-slate-300">REDIS_URL</span> = cette valeur → Save.</li>
+                      </ol>
+                    </div>
+
+                    <div>
+                      <p className="text-slate-300 font-medium mb-1">Alternative : Upstash — 2 variables</p>
+                      <p><a href="https://upstash.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">upstash.com</a> → Create Database → copie REST URL + TOKEN → ajoute <span className="font-mono text-slate-300">UPSTASH_REDIS_REST_URL</span> et <span className="font-mono text-slate-300">UPSTASH_REDIS_REST_TOKEN</span> dans Render.</p>
+                    </div>
                   </div>
                 </details>
                 <div>
