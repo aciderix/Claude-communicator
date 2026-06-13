@@ -99,7 +99,7 @@ public class RelayForegroundService extends Service {
             : new Notification.Builder(this);
         return b.setContentTitle("claude-comm")
             .setContentText(text)
-            .setSmallIcon(getApplicationInfo().icon)
+            .setSmallIcon(getResources().getIdentifier("ic_stat_notify", "drawable", getPackageName()))
             .setContentIntent(pi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -115,7 +115,7 @@ public class RelayForegroundService extends Service {
             : new Notification.Builder(this);
         Notification n = b.setContentTitle("💬 " + author)
             .setContentText(preview)
-            .setSmallIcon(getApplicationInfo().icon)
+            .setSmallIcon(getResources().getIdentifier("ic_stat_notify", "drawable", getPackageName()))
             .setContentIntent(pi)
             .setAutoCancel(true)
             .build();
